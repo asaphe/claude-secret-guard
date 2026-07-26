@@ -1,0 +1,14 @@
+{
+  "name": "claude-secret-guard",
+  "description": "Prevents secrets from landing in Claude's context, history, or files it writes.",
+  "owner": {
+    "name": "asaphe"
+  },
+  "plugins": [
+    {
+      "name": "secret-guard",
+      "source": "./",
+      "description": "Narrow, near-zero-false-positive secret-shape blocks on Read/Write/Edit/Bash/prompt-submit, plus optional masked-cache wrappers for 1Password and AWS Secrets Manager."
+    }
+  ]
+}
