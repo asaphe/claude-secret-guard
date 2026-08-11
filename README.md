@@ -85,6 +85,28 @@ AWS profile: all three wrapper scripts read `AWS_PROFILE` if set, or fall
 back to whatever your `aws` CLI's own default credential resolution does —
 pass `--profile` explicitly to override either.
 
+## Allowlist-config exemption
+
+`write-secret-guard.sh` exits 0 without scanning when the write targets a
+secret-scanner allowlist: `.gitleaks.toml`, `gitleaks.toml`, `.gitleaksignore`,
+or `.secretsignore`. Those files exist to enumerate the values a scanner should
+ignore, so a synthetic fixture literal is their legitimate content — and without
+the exemption the guard blocks the one edit that makes another scanner stop
+firing on test fixtures. Matching is on the exact basename, so a lookalike
+(`my.gitleaks.toml.bak`, `gitleaks.toml.tmpl`) is still scanned.
+
+`write-secret-guard-bash.sh` deliberately does **not** carry the exemption. The
+tool-side guard reads a structured `file_path` and knows exactly what is being
+written; the Bash-side guard sees only a command string, where the real target
+has to be inferred and can be inferred wrongly — `tee .gitleaks.toml other.env`
+writes both, and a redirect can be hidden behind a variable or a later pipe
+stage. An exemption there would fail open, so writing an allowlist config via a
+heredoc stays blocked; use Write/Edit for it. Its error message says so.
+
+The trade-off accepted: a real credential committed inside a file with one of
+those four basenames is not caught by this guard. Such a file is already an
+allowlist, so a scanner would ignore the value regardless.
+
 ## What this plugin does not do
 
 - No log sweeping — see [redacto](https://github.com/asaphe/redacto) for

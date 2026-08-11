@@ -15,6 +15,12 @@ esac
 
 [ -z "$CONTENT" ] && exit 0
 
+# A secret scanner's allowlist has to name the fixture literals it exempts, so these shapes are its legitimate content.
+FILE_PATH=$(echo "$INPUT" | jq -r '.tool_input.file_path // empty')
+case "${FILE_PATH##*/}" in
+  .gitleaks.toml|gitleaks.toml|.gitleaksignore|.secretsignore) exit 0 ;;
+esac
+
 if echo "$CONTENT" | grep -qE -- "$PATTERN"; then
   echo "WRITE-SECRET GUARD: this $TOOL call would write a raw secret-shaped literal (private key / AWS access key / Slack bot token / GitLab PAT) into a file. Use a reference (env var, masked-cache path) instead of the literal value — never hardcode it into code." >&2
   exit 2
