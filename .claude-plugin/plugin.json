@@ -1,7 +1,7 @@
 {
   "name": "secret-guard",
   "description": "Prevents secrets from landing in Claude's context, prompt history, or files it writes — narrow, near-zero-false-positive pattern blocks on Read/Write/Edit/Bash/prompt-submit, plus optional masked-cache wrappers for 1Password and AWS Secrets Manager.",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "author": {
     "name": "asaphe"
   },
