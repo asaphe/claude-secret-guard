@@ -10,7 +10,10 @@ source "$(dirname "${BASH_SOURCE[0]}")/strip-cmd.sh"
 GATE_CMD=$(strip_cmd "$CMD")
 SCAN_CMD=$(strip_cmd "$CMD" long-flags-only)
 
-printf '%s' "$GATE_CMD" | grep -qE '^\s*(cat|head|tail|less|more)\b' || printf '%s' "$GATE_CMD" | grep -qE '\bgrep\b.*-r' || exit 0
+# A reader is a reader wherever it sits, so separators and wrappers must not anchor it away.
+SEP=$';&|()`"\''
+printf '%s' "$GATE_CMD" | tr "$SEP" '\n' | grep -qE '^[[:space:]]*((sudo|xargs|env|nohup|time|command)[[:space:]]+)*(cat|head|tail|less|more)\b' \
+  || printf '%s' "$GATE_CMD" | grep -qE '\bgrep\b.*-r' || exit 0
 
 ask() {
   jq -n --arg reason "$1" \
@@ -25,6 +28,8 @@ tokenize() {
     use Text::ParseWords qw(shellwords);
     my $cmd = do { local $/; <STDIN> };
     my @w = shellwords($cmd);
+    # $'…' and substitution syntax survive tokenizing as punctuation glued to the filename.
+    @w = map { my $t = $_; $t =~ s/^\$//; $t =~ s/[()`]//g; $t } @w;
     # Unbalanced quotes yield nothing; fall back to a bare split so the guard still asks rather than going silent.
     @w = map { my $t = $_; $t =~ s/["\x27]//g; $t } ($cmd =~ /\S+/g) unless @w;
     print join("\0", @w), "\0" if @w;

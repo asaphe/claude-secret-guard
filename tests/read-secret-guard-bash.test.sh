@@ -82,6 +82,19 @@ run ASK "wildcard inside .ssh"                "cat .ssh/*"
 run ASK "wildcard with a key suffix"          "cat *.pem"
 run SILENT "wildcard that cannot match a secret" "cat *.log"
 
+# --- the reader need not be the first word --------------------------------------
+run ASK "reader after a semicolon"            "true; cat $PEM"
+run ASK "reader after &&"                     "ls -la && cat $PEM"
+run ASK "reader behind sudo"                  "sudo cat $PEM"
+run ASK "reader inside bash -c"               "bash -c \"cat $PEM\""
+run ASK "reader after a pipe"                 "echo x | head $PEM"
+run SILENT "prose separator without a reader" "true; rm -rf build"
+
+# --- shell syntax glued to the filename -----------------------------------------
+run ASK "ansi-c quoted dotenv"                "cat \$'.env'"
+run ASK "command substitution argument"       "cat \$(echo $PEM)"
+run ASK "backtick substitution argument"      "cat \`echo $PEM\`"
+
 # --- end-of-options must not hide a dash-prefixed filename ---------------------
 run ASK "dash-prefixed pem after --"          "cat -- -$PEM"
 run ASK "dash-prefixed dotenv after --"       "tail -- -.env"
