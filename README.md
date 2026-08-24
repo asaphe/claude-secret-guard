@@ -72,6 +72,41 @@ region that can still execute is never masked: a flag value or bare
 heredoc body containing `$(…)` or backticks stays visible to the
 predicate, because that text does run.
 
+## Flag masking and filenames
+
+Masking a flag value is right for the mask guard, where the value is
+prose. It is wrong for the reader gate in
+`read-secret-guard-bash.sh`, where a short flag's value can be the very
+filename that gate exists to notice: `less -m` is a valid no-argument
+flag, so `less -m "secrets.pem"` is an ordinary read whose argument
+masking would hide. `-b` is left out of the masked set entirely for the
+same reason (`cat -b`).
+
+So the reader gate strips twice. It decides *whether the command is a
+read* from fully-masked text, which keeps a commit message mentioning
+`grep -r` from tripping it, and then scans for *filenames* in text where
+short flags are left intact. Long prose flags (`--body`, `--message`,
+`--title`, `--notes`, `--description`, `--comment`) are masked in both,
+since no reader command accepts them.
+
+The trade-off is one-directional: because `-m` survives into the scan, a
+prose `-m` value whose last word ends in `.pem`/`.key` can raise a prompt
+on a command that also begins with a reader. That costs a confirmation,
+never a missed read.
+
+That gate also tokenizes with shell quoting rules rather than bare word
+splitting. Splitting on whitespace left quote characters attached, so
+`cat "secrets.pem"` never matched the basename patterns that
+`cat secrets.pem` did. Input it cannot parse — an unbalanced quote —
+falls back to a bare split with quotes removed, so the gate still asks
+rather than going silent.
+
+Globs are not expanded, since the hook's working directory is not
+necessarily the one the command will run in, and a verdict that depends
+on it is not reproducible. An unresolved pattern is judged by what it
+could match instead: `cat *`, `cat .env*` and `cat .ssh/*` all ask,
+while `cat *.log` does not.
+
 ## Why one Bash authority script, not several parallel hooks
 
 `hooks/hooks.json` registers a single script (`bash-secret-authority.sh`)
