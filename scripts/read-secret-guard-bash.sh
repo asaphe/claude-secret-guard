@@ -32,13 +32,17 @@ tokenize() {
 }
 
 while IFS= read -r -d '' token; do
-  BASENAME=$(basename "$token" 2>/dev/null)
-  if printf '%s' "$BASENAME" | grep -qE '^\.env(\..+)?$' && ! printf '%s' "$BASENAME" | grep -qE '^\.env\.(example|sample|template)$'; then
+  BASENAME=$(basename -- "$token" 2>/dev/null)
+  # A glob is not expanded here, so judge the pattern by what it could match rather than by the cwd.
+  if printf '%s' "$token" | grep -qE '[*?]' && { printf '%s' "$BASENAME" | grep -qE '^\.env|^[*?]+$' || printf '%s' "$token" | grep -qE '(^|/)\.ssh/'; }; then
+    ask "READ-SECRET GUARD: $token is an unresolved glob that could match a secret file — confirm before its contents enter context/transcript."
+  fi
+  if printf '%s' "$BASENAME" | grep -qE '^-*\.env(\..+)?$' && ! printf '%s' "$BASENAME" | grep -qE '^-*\.env\.(example|sample|template)$'; then
     ask "READ-SECRET GUARD: $BASENAME looks like a live env file — confirm before its contents enter context/transcript."
   fi
   if printf '%s' "$BASENAME" | grep -qE '\.(pem|key|p12|pfx)$' \
-     || printf '%s' "$BASENAME" | grep -qE '^id_(rsa|ed25519|ecdsa|dsa)$' \
-     || printf '%s' "$BASENAME" | grep -qE '^kubeconfig$' \
+     || printf '%s' "$BASENAME" | grep -qE '^-*id_(rsa|ed25519|ecdsa|dsa)$' \
+     || printf '%s' "$BASENAME" | grep -qE '^-*kubeconfig$' \
      || printf '%s' "$token" | grep -qE '\.kube/config$'; then
     ask "READ-SECRET GUARD: $BASENAME looks like a private key or kubeconfig — confirm before its contents enter context/transcript."
   fi

@@ -58,7 +58,12 @@ run ASK "unbalanced quote still asks"         "cat \"$PEM"
 
 # --- prose describing a read must stay silent (the gate's masking) -------------
 run SILENT "commit message naming a reader"   'git commit -m "fix grep -r over .env files"'
-run SILENT "pr body naming a reader"          "gh pr create --body \"run cat $PEM\""
+run SILENT "non-reader first word stays silent" "gh pr create --body \"run cat $PEM\""
+# First word is a reader, so the gate fires and only the flag masking keeps these silent.
+run SILENT "--body value is masked in the scan"      'cat README.md && gh pr create --body ".env"'
+run SILENT "--comment value is masked in the scan"   'cat README.md && gh issue comment 1 --comment ".env"'
+run SILENT "--description value is masked in the scan" 'cat README.md && gh repo edit --description ".env"'
+run SILENT "--message value is masked in the scan"    'cat README.md && git commit --message ".env"'
 run SILENT "heredoc body naming a file"       "$(printf 'cat <<EOF\n%s\nEOF' "$PEM")"
 
 # --- ordinary reads must stay silent -------------------------------------------
@@ -70,18 +75,34 @@ run SILENT "recursive grep without a match"   "grep -r pattern ."
 run SILENT "non-reader command"               "ls -la"
 run SILENT "empty command"                    ""
 
-# Pre-fix, `for token in $CMD` expanded a bare glob against the cwd and matched the real file.
+# --- globs are judged by pattern, not expanded against the cwd -----------------
+run ASK "bare wildcard could match anything"  "cat *"
+run ASK "dotenv prefix wildcard"              "cat .env*"
+run ASK "wildcard inside .ssh"                "cat .ssh/*"
+run ASK "wildcard with a key suffix"          "cat *.pem"
+run SILENT "wildcard that cannot match a secret" "cat *.log"
+
+# --- end-of-options must not hide a dash-prefixed filename ---------------------
+run ASK "dash-prefixed pem after --"          "cat -- -$PEM"
+run ASK "dash-prefixed dotenv after --"       "tail -- -.env"
+
+# The verdict must not depend on the cwd, and this arm needs a control that can fail.
 GLOBDIR=$(mktemp -d "${TMPDIR:-/tmp}/read-guard-glob.XXXXXX")
 trap 'rm -rf "$GLOBDIR"' EXIT
 : > "$GLOBDIR/$PEM"
-glob_actual=$(cd "$GLOBDIR" && decide 'cat *')
-if [ "$glob_actual" = "SILENT" ]; then
-  printf 'ok   %s\n' "bare glob is not expanded against the cwd"
-  pass=$((pass + 1))
-else
-  printf 'FAIL %s — expected SILENT, got %s\n' "bare glob is not expanded against the cwd" "$glob_actual"
-  fail=$((fail + 1))
-fi
+check_from_globdir() {
+  local expect="$1" label="$2" cmd="$3" actual
+  actual=$(cd "$GLOBDIR" && decide "$cmd")
+  if [ "$actual" = "$expect" ]; then
+    printf 'ok   %s\n' "$label"
+    pass=$((pass + 1))
+  else
+    printf 'FAIL %s — expected %s, got %s\n' "$label" "$expect" "$actual"
+    fail=$((fail + 1))
+  fi
+}
+check_from_globdir ASK    "positive control from the glob cwd" "cat $PEM"
+check_from_globdir SILENT "harmless glob beside a real pem"    "cat *.log"
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

@@ -89,13 +89,23 @@ short flags are left intact. Long prose flags (`--body`, `--message`,
 `--title`, `--notes`, `--description`, `--comment`) are masked in both,
 since no reader command accepts them.
 
+The trade-off is one-directional: because `-m` survives into the scan, a
+prose `-m` value whose last word ends in `.pem`/`.key` can raise a prompt
+on a command that also begins with a reader. That costs a confirmation,
+never a missed read.
+
 That gate also tokenizes with shell quoting rules rather than bare word
 splitting. Splitting on whitespace left quote characters attached, so
 `cat "secrets.pem"` never matched the basename patterns that
-`cat secrets.pem` did, and it also let a glob expand against the working
-directory. Input it cannot parse — an unbalanced quote — falls back to a
-bare split with quotes removed, so the gate still asks rather than going
-silent.
+`cat secrets.pem` did. Input it cannot parse — an unbalanced quote —
+falls back to a bare split with quotes removed, so the gate still asks
+rather than going silent.
+
+Globs are not expanded, since the hook's working directory is not
+necessarily the one the command will run in, and a verdict that depends
+on it is not reproducible. An unresolved pattern is judged by what it
+could match instead: `cat *`, `cat .env*` and `cat .ssh/*` all ask,
+while `cat *.log` does not.
 
 ## Why one Bash authority script, not several parallel hooks
 
