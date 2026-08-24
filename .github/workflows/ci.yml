@@ -14,9 +14,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: shellcheck
-        run: shellcheck -x scripts/*.sh
+        run: shellcheck -x scripts/*.sh tests/*.sh
       - name: bash syntax check
-        run: for f in scripts/*.sh; do bash -n "$f"; done
+        run: for f in scripts/*.sh tests/*.sh; do bash -n "$f"; done
+      - name: guard behaviour tests
+        run: bash tests/op-read-guard.test.sh
       - name: validate JSON
         run: |
           jq empty .claude-plugin/plugin.json
