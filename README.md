@@ -48,7 +48,29 @@ claude plugin install secret-guard@claude-secret-guard
 ```
 
 No external dependencies beyond what you're already using: `jq` (hook
-JSON parsing), and `op`/`aws` CLI only if you use the masked-cache wrappers.
+JSON parsing), `perl` (command-text normalization, ships with macOS and
+most Linux distributions), and `op`/`aws` CLI only if you use the
+masked-cache wrappers.
+
+## Failing closed
+
+`secret-mask-guard.sh` is the one stage here that exists to stop a
+plaintext secret reaching the transcript, so it refuses anything it
+cannot actually inspect: an empty or non-JSON hook payload, or command
+text it cannot normalize because `jq` or `perl` is unavailable. In each
+case it blocks with a message naming the missing tool, rather than
+letting the command run unchecked. The other stages are UX guards
+(duplicate-read suppression, confirm-before-read prompts) and correctly
+fail open — a broken dependency there costs a prompt, not a secret.
+
+That distinction is why the mask guard decides what to match on
+*normalized* text. `strip-cmd.sh` masks the parts of a command that are
+data rather than an executed command — heredoc bodies and the values of
+prose-carrying flags like `--body` and `-m` — so writing a PR body or a
+commit message *about* `op read` is not treated as performing one. A
+region that can still execute is never masked: a flag value or bare
+heredoc body containing `$(…)` or backticks stays visible to the
+predicate, because that text does run.
 
 ## Why one Bash authority script, not several parallel hooks
 
