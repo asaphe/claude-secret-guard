@@ -18,7 +18,9 @@ jobs:
       - name: bash syntax check
         run: for f in scripts/*.sh tests/*.sh; do bash -n "$f"; done
       - name: guard behaviour tests
-        run: bash tests/op-read-guard.test.sh
+        run: |
+          bash tests/op-read-guard.test.sh
+          bash tests/secret-mask-guard.test.sh
       - name: validate JSON
         run: |
           jq empty .claude-plugin/plugin.json

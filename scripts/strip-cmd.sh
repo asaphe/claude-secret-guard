@@ -1,10 +1,19 @@
 #!/usr/bin/env bash
-# Shared utility: strip_cmd() masks heredoc bodies and -m/--message content so downstream pattern-matching ignores commit-message text — see README § strip-cmd.sh.
+# Shared utility: strip_cmd() masks the parts of a command that are data rather than an executed command — heredoc bodies and prose-carrying flag values — so downstream pattern-matching does not fire on a command that merely describes a guarded pattern. A region that can still execute is never masked — see README § Failing closed.
 
 strip_cmd() {
   printf '%s' "$1" | perl -0777 -pe '
-    s/<<-?["\x27]?([A-Za-z_][A-Za-z0-9_]*)["\x27]?\s*\n.*?\n[ \t]*\1\b/<<STRIPPED_HEREDOC>>/gs;
-    s/(-m|--message)([ =]+)"((?:\\.|[^"\\])*)"/\1\2"STRIPPED_MSG"/g;
-    s/(-m|--message)([ =]+)\x27[^\x27]*\x27/\1\2\x27STRIPPED_MSG\x27/g;
+    my $EXEC = qr/\$\(|`/;
+    my $FLAG = qr/--message|--description|--comment|--title|--notes|--body|-m/;
+    s{<<-?(["\x27])([A-Za-z_][A-Za-z0-9_]*)\1\s*\n.*?\n[ \t]*\2\b}{<<STRIPPED_HEREDOC>>}gs;
+    s{<<-?([A-Za-z_][A-Za-z0-9_]*)\s*\n(.*?)\n[ \t]*\1\b}{
+      my ($body, $all) = ($2, $&);
+      $body =~ $EXEC ? $all : "<<STRIPPED_HEREDOC>>";
+    }gse;
+    s{(?<![-\w])($FLAG)([ =]+)"((?:\\.|[^"\\])*)"}{
+      my ($flag, $sep, $val) = ($1, $2, $3);
+      $val =~ $EXEC ? "$flag$sep\"$val\"" : "$flag$sep\"STRIPPED_MSG\"";
+    }ge;
+    s{(?<![-\w])($FLAG)([ =]+)\x27[^\x27]*\x27}{$1$2\x27STRIPPED_MSG\x27}g;
   '
 }
