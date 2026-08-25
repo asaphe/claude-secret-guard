@@ -22,6 +22,7 @@ jobs:
           bash tests/op-read-guard.test.sh
           bash tests/secret-mask-guard.test.sh
           bash tests/read-secret-guard-bash.test.sh
+          bash tests/fixtures.test.sh
       - name: validate JSON
         run: |
           jq empty .claude-plugin/plugin.json

@@ -2,8 +2,15 @@
 # 1Password duplicate-read guard — keys on the parsed secret identity (account, item, fields), never the raw command text, so two fields of one item are distinct reads and a flag reorder is not a new one.
 
 INPUT=$(cat)
-CMD=$(echo "$INPUT" | jq -r '.tool_input.command // empty')
-SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty')
+# Blocks rather than allows: jq failing here yields an empty command, which the check below reads as "nothing to inspect".
+if ! CMD=$(printf '%s' "$INPUT" | jq -r '.tool_input.command // empty' 2>/dev/null); then
+  echo "OP-READ GUARD: cannot read the hook payload — jq is missing or the JSON did not parse. Blocking: the guard cannot confirm this command is safe." >&2
+  exit 2
+fi
+if ! SESSION_ID=$(printf '%s' "$INPUT" | jq -r '.session_id // empty' 2>/dev/null); then
+  echo "OP-READ GUARD: cannot read the hook payload — jq is missing or the JSON did not parse. Blocking: the guard cannot confirm this command is safe." >&2
+  exit 2
+fi
 
 if [ -z "$CMD" ]; then
   exit 0

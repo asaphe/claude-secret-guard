@@ -2,7 +2,11 @@
 # PreToolUse Bash hook, mirrors read-secret-guard.sh's basename gate for cat/head/tail/less/grep readers.
 
 INPUT=$(cat)
-CMD=$(printf '%s' "$INPUT" | jq -r '.tool_input.command // empty')
+# Blocks rather than allows: jq failing here yields an empty command, which every check below reads as "nothing to inspect".
+if ! CMD=$(printf '%s' "$INPUT" | jq -r '.tool_input.command // empty' 2>/dev/null); then
+  echo "READ-SECRET GUARD: cannot read the hook payload — jq is missing or the JSON did not parse. Blocking: the guard cannot confirm this command is safe." >&2
+  exit 2
+fi
 [ -z "$CMD" ] && exit 0
 
 # shellcheck source=scripts/strip-cmd.sh
