@@ -90,6 +90,24 @@ run ALLOW "inject piped to its consumer"     "op inject -i deploy.tpl | kubectl 
 run ALLOW "inject redirected"                "op inject -i .env.tpl > .env"
 run ALLOW "run leaves masking on"            "op run -- ./deploy.sh"
 run ALLOW "item get beside a wrapper reveal" "op $IG X --fields label=username && scripts/op-cache.sh --reveal $U"
+
+# --- a destination only counts when it is a file the transcript does not see ---
+# strip_cmd replaces a masked body with <<STRIPPED_HEREDOC>>, whose >> is not a redirect.
+run BLOCK "heredoc placeholder is not a redirect" "$(printf 'op inject <<EOF\nx\nEOF')"
+run BLOCK "quoted heredoc is not a redirect" "$(printf 'op inject <<%sEOF%s\nx\nEOF' "'" "'")"
+# >&N duplicates a descriptor rather than naming a file, and stderr reaches the transcript too.
+run BLOCK "redirected to stderr"             "op inject -i x >&2"
+run BLOCK "redirected to /dev/stdout"        "op inject -i x > /dev/stdout"
+run BLOCK "redirected to a duped fd"         "op $DG k > /dev/fd/1"
+run ALLOW "control: an ordinary redirect"    "op inject -i x > /tmp/f"
+run ALLOW "control: an append redirect"      "op inject -i x >> /tmp/f"
+run ALLOW "control: the 1> spelling"         "op inject -i x 1> /tmp/f"
+
+# --- the tail is cut at the FIRST subcommand, not the last ---
+# A greedy cut lands inside the filename and hides the very flag it is looking for.
+run ALLOW "out-file value contains inject"   "op $DG key --out-file inject.log"
+run ALLOW "inject out-file contains inject"  "op inject -i template --out-file inject.tpl"
+run BLOCK "control: same shape, no out-file" "op inject -i template.inject"
 run BLOCK "op read with intermediate flags"  "op $R --account example.1password.com $U"
 run BLOCK "after a semicolon"                "git status; op $R $U"
 run BLOCK "after a pipe"                     "printf x | op $R $U"
