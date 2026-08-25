@@ -10,10 +10,14 @@ source "$(dirname "${BASH_SOURCE[0]}")/strip-cmd.sh"
 GATE_CMD=$(strip_cmd "$CMD")
 SCAN_CMD=$(strip_cmd "$CMD" long-flags-only)
 
+# Normalized like the mask guard's verbs, or a quoted reader name (`"cat" secrets.pem`) splits into its own segment with no trailing space and matches nothing.
+GATE_CMD=$(normalize_cmd "$GATE_CMD")
+
 # A reader is a reader wherever it sits, so separators and wrappers must not anchor it away.
 SEP=$';&|()`"\''
-printf '%s' "$GATE_CMD" | tr "$SEP" '\n' | grep -qE '^[[:space:]]*((sudo|xargs|env|nohup|time|command)[[:space:]]+)*(cat|head|tail|less|more)\b' \
-  || printf '%s' "$GATE_CMD" | grep -qE '\bgrep\b.*-r' || exit 0
+# Matched anywhere inside a segment rather than after a fixed wrapper list, which went silent on any prefix the list omitted (timeout, nice, stdbuf, ionice, doas). A leading / admits the same reader named by path, and grep carries no recursive-flag condition: -r decides how many files are read, never whether the one named is a key.
+printf '%s' "$GATE_CMD" | tr "$SEP" '\n' | grep -qE '(^|[[:space:]]|/)(cat|head|tail|less|more|grep)([[:space:]<]|$)' \
+  || exit 0
 
 ask() {
   jq -n --arg reason "$1" \

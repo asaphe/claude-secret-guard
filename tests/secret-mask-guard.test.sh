@@ -45,9 +45,51 @@ U='op://Vault/Item/field'
 # shellcheck disable=SC2016 # literal, unexpanded: the guard must see the substitution syntax
 SUB='$('
 SM='secretsmanager'
+IG='item get'
+DG='document get'
+TAB=$(printf '\t')
 
 # --- a real read must be blocked, wherever it sits in the command ---
 run BLOCK "plain op read"                    "op $R $U"
+
+# --- the wrapper path is not an exemption: a comment naming it used to clear the whole guard ---
+run BLOCK "trailing comment names the wrapper" "op $R $U # see scripts/op-cache.sh"
+run BLOCK "fetch alongside an item get"      "op $IG X; op $R $U"
+run ALLOW "the wrapper actually called"      "\"\$CLAUDE_PLUGIN_ROOT\"/scripts/op-cache.sh --mask $U"
+
+# --- respellings that leave the shell's meaning intact: the predicates normalize before matching ---
+run BLOCK "continuation before the read verb" "$(printf 'op \\\n%s %s' "$R" "$U")"
+run BLOCK "continuation before the aws verb" "$(printf 'aws %s \\\nget-secret-value --secret-id my-secret' "$SM")"
+run BLOCK "double-quoted subcommand"         "op \"$R\" $U"
+run BLOCK "single-quoted subcommand"         "op '$R' $U"
+run BLOCK "binary split across a quote"      "o\"p\" $R $U"
+run BLOCK "backslash inside the binary"      "o\\p $R $U"
+run BLOCK "backslash inside the verb"        "op re\\ad $U"
+run BLOCK "ansi-c quoted verb"               "op \$'$R' $U"
+run BLOCK "tab between the aws words"        "aws $SM${TAB}get-secret-value --secret-id my-secret"
+run BLOCK "tab between document and get"     "op document${TAB}get server-key"
+# A quote pair holding whitespace is left alone, so searching for the phrase is not performing it.
+run ALLOW "grep for the read phrase"         "grep -rn \"op $R\" scripts/"
+run ALLOW "echoing the phrase"               "echo \"we block op $R\""
+
+# --- the other 1Password subcommands that print a value ---
+run BLOCK "item get --reveal"                "op $IG Netflix --reveal"
+run BLOCK "item get --otp"                   "op $IG Netflix --otp"
+run BLOCK "document get to stdout"           "op $DG server-key"
+run BLOCK "inject to stdout"                 "op inject -i config.tpl"
+run BLOCK "inject reading from stdin"        "op inject < config.tpl"
+run BLOCK "run with masking disabled"        "op run --no-masking -- env"
+run BLOCK "-only is not an output flag"      "op $DG server-key -only"
+run BLOCK "out-file pointed at stdout"       "op $DG server-key --out-file /dev/stdout"
+run BLOCK "-o precedes the subcommand"       "ssh -o StrictHostKeyChecking=no host \"op $DG server-key\""
+run BLOCK "only stderr is redirected"        "op inject -i config.tpl 2>/dev/null"
+# Each predicate is flag-conditional and scoped to the fetch's own segment, so the concealing, file-bound and masked forms stay usable.
+run ALLOW "item get conceals by default"     "op $IG Netflix --fields label=username"
+run ALLOW "document get --out-file"          "op $DG server-key --out-file /tmp/k"
+run ALLOW "inject piped to its consumer"     "op inject -i deploy.tpl | kubectl apply -f -"
+run ALLOW "inject redirected"                "op inject -i .env.tpl > .env"
+run ALLOW "run leaves masking on"            "op run -- ./deploy.sh"
+run ALLOW "item get beside a wrapper reveal" "op $IG X --fields label=username && scripts/op-cache.sh --reveal $U"
 run BLOCK "op read with intermediate flags"  "op $R --account example.1password.com $U"
 run BLOCK "after a semicolon"                "git status; op $R $U"
 run BLOCK "after a pipe"                     "printf x | op $R $U"
