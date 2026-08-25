@@ -42,6 +42,12 @@ run ASK "reader behind ionice"                "ionice -c3 cat $PEM"
 run ASK "absolute path to cat"                "/bin/cat $PEM"
 run ASK "relative path to head"               "./bin/head $PEM"
 run ASK "redirect glued to the reader"        "cat<$PEM"
+# The suffix patterns survive the glue; the anchored ones do not, so a glued token has to be split.
+run ASK "glued redirect before dotenv"        "cat<.env"
+run ASK "glued redirect before an ssh key"    "cat<id_rsa"
+run ASK "glued redirect before a kubeconfig"  "cat<kubeconfig"
+run ASK "glued redirect under grep"           "grep NEEDLE<$KEY"
+run SILENT "glued redirect, ordinary file"    "cat<README.md"
 
 # --- grep is gated whether or not it recurses: -r decides how many files are read, not whether one is a key ---
 run ASK "non-recursive -f names a pem"        "grep -f $PEM ."

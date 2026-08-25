@@ -34,6 +34,8 @@ tokenize() {
     my @w = shellwords($cmd);
     # $'…' and substitution syntax survive tokenizing as punctuation glued to the filename.
     @w = map { my $t = $_; $t =~ s/^\$//; $t =~ s/[()`]//g; $t } @w;
+    # A redirect glues its target to the reader, and the basename patterns are anchored: cat<.env is one token that matches nothing.
+    @w = grep { length } map { split /[<>]+/, $_ } @w;
     # Unbalanced quotes yield nothing; fall back to a bare split so the guard still asks rather than going silent.
     @w = map { my $t = $_; $t =~ s/["\x27]//g; $t } ($cmd =~ /\S+/g) unless @w;
     print join("\0", @w), "\0" if @w;

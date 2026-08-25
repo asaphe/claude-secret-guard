@@ -64,12 +64,21 @@ while IFS= read -r SEG; do
 
   echo "$SEG" | grep -qE '(^|[^[:alnum:]_-])op[[:space:]](.*[[:space:]])?(document[[:space:]]+get|inject)([[:space:]]|$)' || continue
   # Only what follows the subcommand can be its own output flag; an -o earlier on the line belongs to another command, as in `ssh -o X host "op document get k"`.
-  SEG_TAIL=$(printf '%s' "$SEG" | sed -E 's/^.*(document[[:space:]]+get|inject)//')
-  # Named before the flag is honoured at all: an --out-file whose value is stdout is not somewhere else for the value to go.
-  if echo "$SEG_TAIL" | grep -qE '(--out-file|-o)[[:space:]=]*(/dev/(stdout|fd/[0-9]+)|-)([[:space:]]|$)'; then
+  # Cut at the FIRST occurrence, which `${var#*x}` gives and a greedy sed does not: with `--out-file inject.log` the rightmost match is inside the filename, and the tail then hides the very flag it is looking for.
+  SEG_ONE=$(printf '%s' "$SEG" | tr -s '[:space:]' ' ')
+  TAIL_DOC="${SEG_ONE#*document get}"; [ "$TAIL_DOC" = "$SEG_ONE" ] && TAIL_DOC=""
+  TAIL_INJ="${SEG_ONE#*inject}";       [ "$TAIL_INJ" = "$SEG_ONE" ] && TAIL_INJ=""
+  # The earlier cut is the longer tail.
+  if [ "${#TAIL_DOC}" -ge "${#TAIL_INJ}" ]; then SEG_TAIL="$TAIL_DOC"; else SEG_TAIL="$TAIL_INJ"; fi
+  # strip_cmd's own placeholder carries a >> that is not a redirect.
+  SEG_TAIL=${SEG_TAIL//<<STRIPPED_HEREDOC>>/}
+  # Named before any destination is honoured: stdout under another name is not somewhere else for the value to go.
+  if echo "$SEG_TAIL" | grep -qE '(--out-file|-o|>>?)[[:space:]=]*(/dev/(stdout|fd/[0-9]+)|-)([[:space:]]|$)'; then
     :
-  # A pipe or a stdout redirect sends the value to a process or a file rather than to the transcript; 2> and friends do not, so a digit before the operator disqualifies it.
-  elif echo "$SEG_TAIL" | grep -qE '(^|[[:space:]])(--out-file([[:space:]=]|$)|-o([[:space:]=/]|$))|\||([^0-9]|^)>|(^|[[:space:]])1>'; then
+  # A pipe or a stdout redirect sends the value to a process or a file rather than to the transcript. `2>` does not, so only a bare or 1-prefixed operator counts, and `>&2` is an fd duplicate rather than a file.
+  elif echo "$SEG_TAIL" | grep -qE '(^|[[:space:]])(--out-file([[:space:]=]|$)|-o([[:space:]=/]|$))' \
+    || echo "$SEG_TAIL" | grep -qE '\|' \
+    || echo "$SEG_TAIL" | grep -qE '(^|[[:space:]])1?>>?[[:space:]]*[^&[:space:]]'; then
     continue
   fi
   echo "SECRET-MASK GUARD: 'op document get' and 'op inject' print the resolved secret to stdout, which is this tool_result/transcript. Give it somewhere else to go — --out-file <path> (op creates that file 0600), a redirect, or a pipe into whatever consumes it." >&2
