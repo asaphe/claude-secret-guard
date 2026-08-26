@@ -208,6 +208,19 @@ run ALLOW "single-quoted both"                "op $DG 'My Doc' > '/tmp/out'"
 run ALLOW "variables for both, quoted"        "op inject -i \"\$TPL\" > \"\$OUT\""
 run ALLOW "a # inside a quoted argument"      "op $DG \"a # b\" > /tmp/f"
 
+# --- a quoted stdout alias is still stdout ---
+# The permissive test reads a tail with quoted runs blanked, so the restrictive one has to read the tail as written or "/dev/stdout" becomes filler and the broader redirect test calls it a file.
+run BLOCK "quoted /dev/stdout"                "op $DG key > \"/dev/stdout\""
+run BLOCK "single-quoted /dev/stdout"         "op $DG key > '/dev/stdout'"
+run BLOCK "quoted /dev/fd/1"                  "op inject -i t > \"/dev/fd/1\""
+run BLOCK "quoted bare dash out-file"         "op $DG key --out-file \"-\""
+run BLOCK "control: unquoted /dev/stdout"     "op $DG key > /dev/stdout"
+
+# --- the cut reads the raw segment, so it has to tolerate the quotes normalization removes ---
+run ALLOW "quoted subcommand, real redirect"  "op \"document\" get k > /tmp/f"
+run ALLOW "quoted subcommand, real out-file"  "op \"inject\" -i t --out-file /tmp/f"
+run BLOCK "control: quoted subcommand, none"  "op \"document\" get k"
+
 # --- op's own global flags may carry a quoted value holding whitespace ---
 # The value matcher stopped at the first space, so every predicate below went silent — including the raw-read block, which is a fetch reaching the transcript.
 run BLOCK "quoted --config with a space"      "op --config \"/Application Support/op\" $R $U"
