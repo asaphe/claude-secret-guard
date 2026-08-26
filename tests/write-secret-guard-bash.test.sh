@@ -45,8 +45,9 @@ run BLOCK "split by an empty single-quote pair"  "echo \"$HEAD4''$REST\" > out.t
 run BLOCK "split by an empty double-quote pair"  "echo \"$HEAD4\"\"$REST\" > out.txt"
 run BLOCK "split by a backslash"                 "echo \"$HEAD4\\\\$REST\" > out.txt"
 
-# The raw spelling survives alongside the normalized one so an escape stays part of the text; the shape itself still carries a leading \b, so a key written directly behind a literal \n is a separate gap.
-run ALLOW "a key behind an escaped newline"      "printf 'x\\n$KEY' > out.txt"
+# \b fails when the preceding character is the n of a literal \n, which is how a key lands in k8s stringData or JSON config; the shared pattern counts a two-character escape as a left boundary, and the raw spelling has to survive the scan for it to be visible at all.
+run BLOCK "a key behind an escaped newline"      "printf 'x\\n$KEY' > out.txt"
+run BLOCK "a key behind an escaped tab"          "printf 'x\\t$KEY' > out.txt"
 
 run ALLOW "an ordinary write"                    "echo hello > out.txt"
 run ALLOW "a literal that reaches no file"       "echo \"$KEY\""

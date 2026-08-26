@@ -62,14 +62,18 @@ cannot actually inspect: an empty or non-JSON hook payload, or command
 text it cannot read because `jq` is unavailable. It blocks with a message
 naming the missing tool, rather than letting the command run unchecked.
 
-`perl` is the deliberate exception. `strip-cmd.sh` degrades to the
-*unmodified* command when `perl` cannot run, so the predicates still see
-the raw text and a real fetch is still blocked. Returning empty instead
-would hit every caller's "nothing to inspect" early exit and disarm the
-guard; blocking every `Bash` call would make an absent interpreter a hard
-outage. Neither trade is necessary. The other stages are UX guards
-(duplicate-read suppression, confirm-before-read prompts) and correctly
-fail open — a broken dependency there costs a prompt, not a secret.
+**Every stage does the same for `jq` specifically.** An unreadable hook
+payload blocks the call rather than being read as "nothing to inspect" —
+`jq -r '… // empty'` returns an empty string when `jq` is missing or the
+JSON does not parse, and every check downstream treats empty as "nothing
+here", which silently disarms the guard. That is deliberate and it is not
+free: with `jq` absent, every guarded call is refused.
+
+`perl` is the exception, on purpose. `strip-cmd.sh` degrades to the
+*unmodified* command when `perl` cannot run, so the predicates still see the
+raw text and a real fetch is still blocked. Returning empty instead would hit
+the same "nothing to inspect" exit; blocking every call would make an absent
+interpreter a hard outage. Neither trade is necessary.
 
 That distinction is why the mask guard decides what to match on
 *normalized* text. `strip-cmd.sh` masks the parts of a command that are
@@ -185,6 +189,73 @@ indefinitely.
 AWS profile: all three wrapper scripts read `AWS_PROFILE` if set, or fall
 back to whatever your `aws` CLI's own default credential resolution does —
 pass `--profile` explicitly to override either.
+
+## Sanctioned fixtures
+
+A known-positive control for a secret scanner **is** a secret-shaped literal.
+Without a sanctioned route the only way past the guards is to hide the value
+from them — splitting it across variables and rejoining at runtime — which
+trains a bypass habit and leaves no record that an exemption was taken. Two
+mechanisms replace that habit. Neither reads a destination path, so both work
+on the `Bash` surface where most blocks arrive.
+
+### The exact-value allowlist
+
+`fixtures.allow`, shipped with the plugin and read from beside the guard that
+uses it.
+
+- One exact value per line. Blank lines and `#` lines are ignored; every other
+  line is compared byte-for-byte, so a trailing space silently makes an entry
+  dead.
+- A call is exempt **only when every matched literal in it is listed**. One
+  unlisted match blocks the whole call — otherwise a command carrying an
+  approved fixture alongside a real credential would pass.
+- A missing or unreadable file blocks everything.
+- A PEM header can never be listed. It is byte-identical in a real private key,
+  so honouring one would blind the guards to every private key; such an entry
+  is ignored and announced on stderr. Generate PEM fixtures instead.
+- An entry must be a **complete** value of a guarded shape, not a fragment or a
+  prefix. A prefix would subtract the part every rotation of the same
+  credential shares, so listing one fixture would silently exempt its
+  replacements; such an entry is ignored.
+- Exemption works by subtracting the listed values from the payload and
+  re-testing the remainder, not by enumerating matches. `grep -oE` and
+  `grep -qE` disagree on GNU grep when a match's leading boundary was consumed
+  by the one before it, so enumeration misses the second of two adjacent
+  secrets on Linux while passing on macOS.
+
+When an exemption is taken the guard names the values it cleared on stderr —
+but Claude Code sends a hook's stderr to the debug log on **exit 0** and shows
+it only on **exit 2**. So the notice is an audit trail you can go and read, not
+something surfaced at the moment it happens.
+
+The patterns themselves are untouched by any of this. The allowlist subtracts
+named values; it never reshapes a shape.
+
+### The generator
+
+`scripts/fixture-value.sh <shape>` prints one conforming value on stdout for
+`aws-access-key`, `slack-bot-token`, `gitlab-pat`, or `pem-private-key`. It
+takes a shape name and nothing else — there is no argument that accepts a
+value, which is what makes it incapable of emitting a real secret. It also
+checks its own output against the guard pattern before printing, because a
+value the guards would not flag is useless as a known-positive.
+
+Generating is not the workaround it resembles. Hiding a value splits a literal
+you already have; generating produces one that did not exist until the command
+ran, so there is nothing being kept from anyone.
+
+### What this does not make safe
+
+A session can add a value to `fixtures.allow` and then write it. The exemption
+is visible in the diff and gated at review, but it is not gated in-session —
+strictly better than the alternative, where the same manoeuvre leaves no
+artifact at all.
+
+One shape cannot currently be allowlisted: a Slack bot token is matched by its
+`xoxb-<digits>-<digits>` prefix as well as its full form, and an entry has to
+be a complete value, so listing the full token works while a truncated one is
+refused. Nothing else about Slack detection changed.
 
 ## Allowlist-config exemption
 

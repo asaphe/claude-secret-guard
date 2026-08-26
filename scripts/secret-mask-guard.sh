@@ -9,7 +9,11 @@ if [ -z "$INPUT" ] || ! printf '%s' "$INPUT" | jq -e 'type == "object"' >/dev/nu
   exit 2
 fi
 
-CMD=$(printf '%s' "$INPUT" | jq -r '.tool_input.command // empty')
+# Blocks rather than allows: a .tool_input that is not an object makes this filter error, and an unchecked assignment leaves CMD empty, which the check below reads as "nothing to inspect".
+if ! CMD=$(printf '%s' "$INPUT" | jq -r '.tool_input.command // empty' 2>/dev/null); then
+  echo "SECRET-MASK GUARD: cannot read the hook payload — jq is missing or the JSON did not parse. Blocking: the guard cannot confirm this command is safe." >&2
+  exit 2
+fi
 
 if [ -z "$CMD" ]; then
   exit 0

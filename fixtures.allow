@@ -1,0 +1,16 @@
+# Sanctioned fixture values, subtracted from the secret shapes by scripts/secret-shapes.sh.
+# Full semantics, and why an allowlist rather than a path exemption: README § Sanctioned fixtures.
+#
+# Format: one exact value per line. Blank lines and lines beginning with `#` are ignored; every
+# other line is compared byte-for-byte, so a trailing space silently makes an entry dead.
+# A call is exempt only when EVERY matched literal in it is listed here — one unlisted match
+# blocks the whole call. A missing or unreadable file blocks everything, by design.
+#
+# A PEM header can never be listed. It is byte-identical in a real private key, so honouring one
+# would blind the guards to every private key; such an entry is ignored with a notice. Generate
+# PEM fixtures instead:  scripts/fixture-value.sh pem-private-key
+#
+# Adding a value: this file's diff is the record, so it goes through review. Add the same value to
+# your repo's secret-scanner allowlist in the same PR — the two lists are deliberately separate and
+# neither is derived from the other. Never type a value into a shell command to get it here:
+# harvest it from committed source, or generate it.

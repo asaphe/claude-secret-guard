@@ -26,8 +26,14 @@ if [ "$DUP_CODE" -ne 0 ]; then
 fi
 
 ASK_OUT=$(printf '%s' "$INPUT" | bash "$HOOKS_DIR/read-secret-guard-bash.sh")
+ASK_CODE=$?
+# Without this the reader's own fail-closed branch is inert on the wired path: only its stdout was read, so a non-zero exit reached the caller as a plain allow.
+if [ "$ASK_CODE" -ne 0 ]; then
+  [ -n "$ASK_OUT" ] && printf '%s\n' "$ASK_OUT" >&2
+  exit "$ASK_CODE"
+fi
 if [ -n "$ASK_OUT" ]; then
-  echo "$ASK_OUT"
+  printf '%s\n' "$ASK_OUT"
   exit 0
 fi
 
