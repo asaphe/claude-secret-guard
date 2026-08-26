@@ -58,17 +58,22 @@ strip_cmd() {
       return substr($p, $cut);
     };
     my $heredoc = sub {
-      my ($pre, $tail, $body, $all, $quoted) = @_;
+      my ($pre, $tail, $body, $all, $quoted, $post) = @_;
       return $all if $owner->($pre) =~ $INTERP;
       # The rest of that line consumes the body too: `<<EOF | python3` feeds it to an interpreter exactly as a preceding command would.
       return $all if $tail =~ $INTERP;
+      # A body written to a file is data only until something runs that file. If the destination is named again later in the same command, the masked region executes a few bytes on and must stay visible.
+      for my $tok ("$pre $tail" =~ m{([^\s"\x27;&|<>()]*[/.][^\s"\x27;&|<>()]*)}g) {
+        next if length($tok) < 3;
+        return $all if index($post, $tok) >= 0;
+      }
       return $all if !$quoted && $body =~ $EXEC;
       return "$pre<<STRIPPED_HEREDOC>>$tail";
     };
     # The operator does not have to end its line: `cat <<EOF > file` and `cat <<EOF | tee file` are the ordinary spellings, and requiring whitespace to the newline left both bodies unmasked.
-    $cmd =~ s{([^\n]*?)(?<!<)<<-?[ \t]*(["\x27])([A-Za-z_][A-Za-z0-9_]*)\2([^\n]*)\n(.*?)\n[ \t]*\3\b}{ $heredoc->($1, $4, $5, $&, 1) }gse;
-    $cmd =~ s{([^\n]*?)(?<!<)<<-?[ \t]*\\([A-Za-z_][A-Za-z0-9_]*)([^\n]*)\n(.*?)\n[ \t]*\2\b}{ $heredoc->($1, $3, $4, $&, 1) }gse;
-    $cmd =~ s{([^\n]*?)(?<!<)<<-?[ \t]*([A-Za-z_][A-Za-z0-9_]*)([^\n]*)\n(.*?)\n[ \t]*\2\b}{ $heredoc->($1, $3, $4, $&, 0) }gse;
+    $cmd =~ s{([^\n]*?)(?<!<)<<-?[ \t]*(["\x27])([A-Za-z_][A-Za-z0-9_]*)\2([^\n]*)\n(.*?)\n[ \t]*\3\b}{ $heredoc->($1, $4, $5, $&, 1, substr($cmd, $+[0])) }gse;
+    $cmd =~ s{([^\n]*?)(?<!<)<<-?[ \t]*\\([A-Za-z_][A-Za-z0-9_]*)([^\n]*)\n(.*?)\n[ \t]*\2\b}{ $heredoc->($1, $3, $4, $&, 1, substr($cmd, $+[0])) }gse;
+    $cmd =~ s{([^\n]*?)(?<!<)<<-?[ \t]*([A-Za-z_][A-Za-z0-9_]*)([^\n]*)\n(.*?)\n[ \t]*\2\b}{ $heredoc->($1, $3, $4, $&, 0, substr($cmd, $+[0])) }gse;
 
     $mapq->();
     $cmd =~ s{(?<![-\w])($FLAG)([ =]*)"((?:\\.|[^"\\])*)"}{
