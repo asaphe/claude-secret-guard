@@ -208,6 +208,15 @@ run ALLOW "single-quoted both"                "op $DG 'My Doc' > '/tmp/out'"
 run ALLOW "variables for both, quoted"        "op inject -i \"\$TPL\" > \"\$OUT\""
 run ALLOW "a # inside a quoted argument"      "op $DG \"a # b\" > /tmp/f"
 
+# --- an alias spelling that does not run is not a destination either ---
+# Reading the tail as written let a /dev/stdout inside a comment or a quoted flag value take the block path, refusing a fetch that already named a real file.
+run ALLOW "real out-file, alias in a comment"  "op $DG key --out-file /tmp/f # > /dev/stdout"
+run ALLOW "real redirect, alias in a comment"  "op $DG key > /tmp/f # /dev/stdout"
+run ALLOW "real out-file, quoted -o alias"     "op $DG key --tags '-o /dev/stdout' --out-file /tmp/f"
+run ALLOW "real redirect, quoted alias tag"    "op $DG key --tags '/dev/stdout' > /tmp/f"
+run BLOCK "control: unquoted bare dash"        "op $DG key --out-file -"
+run ALLOW "control: quoted path with a space"  "op $DG key --out-file \"/tmp/my file\""
+
 # --- a quoted stdout alias is still stdout ---
 # The permissive test reads a tail with quoted runs blanked, so the restrictive one has to read the tail as written or "/dev/stdout" becomes filler and the broader redirect test calls it a file.
 run BLOCK "quoted /dev/stdout"                "op $DG key > \"/dev/stdout\""
