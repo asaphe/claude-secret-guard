@@ -82,34 +82,35 @@ while IFS= read -r SEG_RAW; do
   # Only what follows the subcommand can be its own output flag; an -o earlier on the line belongs to another command, as in `ssh -o X host "op document get k"`.
   # Cut where the anchored pattern matched, not at the first literal spelling: `cat inject.tpl | op inject -i -` cut inside the filename, and the tail then held cat's pipe rather than op's own.
   # Read from the raw segment with quote state tracked: normalization deletes the quotes that tell a redirect operator apart from an argument merely spelled like one, and a regex cannot pair quotes — blanking them with one ate the --reveal flag two checks above.
+  # Only the characters that could FORM an operator are neutralized inside a quoted run, so `> "/dev/stdout"` still names stdout while `--tags "-o /x"` names nothing; a run that is exactly a dash is the stdout operand and survives.
   SEG_ONE=$(printf '%s' "$SEG_RAW" | tr -s '[:space:]' ' ')
   SEG_QSUB="[\"$SG_SQ]?"
   SEG_PAT="${OP_PRE}${SEG_QSUB}(document${SEG_QSUB}[[:space:]]+${SEG_QSUB}get|inject)${SEG_QSUB}"
-  # The alias check below must read the tail as written: blanking a quoted run turns "/dev/stdout" into filler, and the broader destination test then reads it as a real file.
-  SEG_TAIL_RAW=$(printf '%s' "$SEG_ONE" | awk -v pat="$SEG_PAT" '{ if (match($0, pat)) print substr($0, RSTART + RLENGTH) }')
   SEG_TAIL=$(printf '%s' "$SEG_ONE" | awk -v pat="$SEG_PAT" -v sq="'" '
     {
       if (!match($0, pat)) exit
       tail = substr($0, RSTART + RLENGTH)
-      out = ""; q = ""
+      out = ""; q = ""; buf = ""
       for (i = 1; i <= length(tail); i++) {
         c = substr(tail, i, 1)
         if (q == "") {
-          if (c == "\"" || c == sq) { q = c; out = out " "; continue }
+          if (c == "\"" || c == sq) { q = c; buf = ""; continue }
           if (c == "#" && (i == 1 || substr(tail, i - 1, 1) == " ")) break
           out = out c
-        } else {
-          if (c == q) { q = ""; out = out " "; continue }
-          out = out "x"
-        }
+        } else if (c == q) {
+          q = ""
+          if (buf != "-") gsub(/[-<>&|#]/, "x", buf)
+          out = out " " buf " "
+          buf = ""
+        } else buf = buf c
       }
+      if (q != "") { gsub(/[-<>&|#]/, "x", buf); out = out " " buf }
       print out
     }')
   # strip_cmd's own placeholder carries a >> that is not a redirect.
   SEG_TAIL=${SEG_TAIL//<<STRIPPED_HEREDOC>>/}
-  SEG_TAIL_RAW=${SEG_TAIL_RAW//<<STRIPPED_HEREDOC>>/}
   # Named before any destination is honoured: stdout under another name is not somewhere else for the value to go.
-  if echo "$SEG_TAIL_RAW" | grep -qE '(--out-file|-o|&?>>?|>&)[[:space:]=]*["'"'"']?(/dev/(stdout|fd/[0-9]+)|-)["'"'"']?([[:space:]]|$)'; then
+  if echo "$SEG_TAIL" | grep -qE '(--out-file|-o|&?>>?|>&)[[:space:]=]*["'"'"']?(/dev/(stdout|fd/[0-9]+)|-)["'"'"']?([[:space:]]|$)'; then
     :
   # A pipe or a redirect that names a file sends the value somewhere the transcript does not see. `2>` does not, and `>&N`/`>&-` duplicate or close a descriptor rather than naming a file — but `&>f`, `&>>f` and `>&f` do reach one.
   elif echo "$SEG_TAIL" | grep -qE '(^|[[:space:]])(--out-file([[:space:]=]|$)|-o([[:space:]=/]|$))' \
