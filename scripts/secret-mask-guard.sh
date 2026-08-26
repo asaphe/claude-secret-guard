@@ -34,7 +34,7 @@ SCAN=$(normalize_cmd "$CMD")
 
 # Anchored to the subcommand position rather than to "anywhere after op": only op's own global flags and their values may precede it, or a word that happens to be spelled like a subcommand reads as one. The flag names are a closed set, so an unrelated command carrying both words in flag values is not an op invocation.
 # A value may be a quoted run holding whitespace — `--config "/Application Support/op"` is an ordinary spelling, and a matcher that stopped at the first space silenced every predicate below.
-OP_PRE='(^|[^[:alnum:]_-])op([[:space:]]+(--(account|config|session|format|encoding|cache|debug|no-color|iso-timestamps)([[:space:]=]+("[^"]*"|'"'"'[^'"'"']*'"'"'|[^-[:space:]][^[:space:]]*))?|-[A-Za-z]+([[:space:]]+("[^"]*"|'"'"'[^'"'"']*'"'"'|[^-[:space:]][^[:space:]]*))?))*[[:space:]]+'
+OP_PRE='(^|[^[:alnum:]_-])op["'"'"']?([[:space:]]+(--(account|config|session|format|encoding|cache|debug|no-color|iso-timestamps)([[:space:]=]+("[^"]*"|'"'"'[^'"'"']*'"'"'|[^-[:space:]][^[:space:]]*))?|-[A-Za-z]+([[:space:]]+("[^"]*"|'"'"'[^'"'"']*'"'"'|[^-[:space:]][^[:space:]]*))?))*[[:space:]]+'
 
 # No wrapper-path early exit: a legitimate wrapper call does not match the fetch patterns below anyway, so all it could exempt was text that merely named the path — a trailing `# see scripts/op-cache.sh` used to clear the whole guard.
 # --- op read <uri> ---
@@ -61,6 +61,7 @@ fi
 # &> and >& are redirect operators, not command separators, so they are hidden from the split and restored inside the segment.
 # Restored through a variable, never as a literal: bash 5.2 made a bare & in a replacement expand to the matched text, so the literal spelling silently produces different output on either side of that release.
 SG_AMPGT='&>'
+SG_SQ="'"
 SG_GTAMP='>&'
 SEG_SRC=${CMD//&>/$'\001'}
 SEG_SRC=${SEG_SRC//>&/$'\002'}
@@ -86,7 +87,11 @@ while IFS= read -r SEG_RAW; do
   # Cut where the anchored pattern matched, not at the first literal spelling: `cat inject.tpl | op inject -i -` cut inside the filename, and the tail then held cat's pipe rather than op's own.
   # Read from the raw segment with quote state tracked: normalization deletes the quotes that tell a redirect operator apart from an argument merely spelled like one, and a regex cannot pair quotes — blanking them with one ate the --reveal flag two checks above.
   SEG_ONE=$(printf '%s' "$SEG_RAW" | tr -s '[:space:]' ' ')
-  SEG_TAIL=$(printf '%s' "$SEG_ONE" | awk -v pat="${OP_PRE}(document[[:space:]]+get|inject)" -v sq="'" '
+  SEG_QSUB="[\"$SG_SQ]?"
+  SEG_PAT="${OP_PRE}${SEG_QSUB}(document${SEG_QSUB}[[:space:]]+${SEG_QSUB}get|inject)${SEG_QSUB}"
+  # The alias check below must read the tail as written: blanking a quoted run turns "/dev/stdout" into filler, and the broader destination test then reads it as a real file.
+  SEG_TAIL_RAW=$(printf '%s' "$SEG_ONE" | awk -v pat="$SEG_PAT" '{ if (match($0, pat)) print substr($0, RSTART + RLENGTH) }')
+  SEG_TAIL=$(printf '%s' "$SEG_ONE" | awk -v pat="$SEG_PAT" -v sq="'" '
     {
       if (!match($0, pat)) exit
       tail = substr($0, RSTART + RLENGTH)
@@ -106,8 +111,9 @@ while IFS= read -r SEG_RAW; do
     }')
   # strip_cmd's own placeholder carries a >> that is not a redirect.
   SEG_TAIL=${SEG_TAIL//<<STRIPPED_HEREDOC>>/}
+  SEG_TAIL_RAW=${SEG_TAIL_RAW//<<STRIPPED_HEREDOC>>/}
   # Named before any destination is honoured: stdout under another name is not somewhere else for the value to go.
-  if echo "$SEG_TAIL" | grep -qE '(--out-file|-o|&?>>?|>&)[[:space:]=]*(/dev/(stdout|fd/[0-9]+)|-)([[:space:]]|$)'; then
+  if echo "$SEG_TAIL_RAW" | grep -qE '(--out-file|-o|&?>>?|>&)[[:space:]=]*["'"'"']?(/dev/(stdout|fd/[0-9]+)|-)["'"'"']?([[:space:]]|$)'; then
     :
   # A pipe or a redirect that names a file sends the value somewhere the transcript does not see. `2>` does not, and `>&N`/`>&-` duplicate or close a descriptor rather than naming a file — but `&>f`, `&>>f` and `>&f` do reach one.
   elif echo "$SEG_TAIL" | grep -qE '(^|[[:space:]])(--out-file([[:space:]=]|$)|-o([[:space:]=/]|$))' \

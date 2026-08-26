@@ -65,7 +65,7 @@ strip_cmd() {
       # A body written to a file is data only until something runs that file. If the destination is named again later in the same command, the masked region executes a few bytes on and must stay visible.
       for my $tok ("$pre $tail" =~ m{([^\s"\x27;&|<>()]*[/.][^\s"\x27;&|<>()]*)}g) {
         next if length($tok) < 3;
-        return $all if index($post, $tok) >= 0;
+        return $all if $post =~ /\Q$tok\E(?![^\s;&|<>()"\x27])/;
       }
       return $all if !$quoted && $body =~ $EXEC;
       return "$pre<<STRIPPED_HEREDOC>>$tail";

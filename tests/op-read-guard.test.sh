@@ -71,6 +71,9 @@ run ALLOW "a script written by heredoc is a fetch"    "$(printf 'cat <<%sEOF%s >
 run BLOCK "so the read after it is a duplicate"       "op read op://Vault/Script/f"
 run ALLOW "the same via tee then sh"                  "$(printf 'tee /tmp/y.sh <<%sEOF%s >/dev/null\nop read op://Vault/Teed/f\nEOF\nsh /tmp/y.sh' "$Q" "$Q")"
 run BLOCK "and that one dedupes too"                  "op read op://Vault/Teed/f"
+# Named again means the whole path, not a prefix of one: a substring test kept every runbook visible whose destination happened to prefix a later word.
+run ALLOW "a path that only prefixes a later one"     "$(printf 'cat <<%sEOF%s > /tmp/run\nrun: op read op://Vault/Prefix/f\nEOF\necho /tmp/runtime' "$Q" "$Q")"
+run ALLOW "its genuine read is still first"           "op read op://Vault/Prefix/f"
 run ALLOW "a runbook with an unrelated command after" "$(printf 'cat <<%sEOF%s > guide.md\nrun: op read op://Vault/Guide/f\nEOF\necho done' "$Q" "$Q")"
 run ALLOW "its genuine read is still first"           "op read op://Vault/Guide/f"
 
