@@ -146,5 +146,28 @@ check_from_globdir() {
 check_from_globdir ASK    "positive control from the glob cwd" "cat $PEM"
 check_from_globdir SILENT "harmless glob beside a real pem"    "cat *.log"
 
+# --- the authority must carry this guard's exit code, not just its stdout ---
+# Only stdout was read, so the reader's own fail-closed branch reached the caller as a plain allow. Stubbed rather than provoked, because every earlier stage refuses the same unreadable payload first and would exit before this one runs.
+AUTH_DIR=$(mktemp -d "${TMPDIR:-/tmp}/auth-wiring.XXXXXX") || { printf 'FATAL: mktemp failed\n'; exit 1; }
+cp "$(dirname "$GUARD")"/*.sh "$AUTH_DIR/"
+printf '#!/bin/sh\necho "READ-SECRET GUARD: stub refusal" >&2\nexit 2\n' > "$AUTH_DIR/read-secret-guard-bash.sh"
+chmod +x "$AUTH_DIR/read-secret-guard-bash.sh"
+jq -nc '{tool_input:{command:"echo hi"}}' | bash "$AUTH_DIR/bash-secret-authority.sh" >/dev/null 2>&1
+AUTH_CODE=$?
+if [ "$AUTH_CODE" -eq 2 ]; then
+  printf 'ok   the authority propagates the reader refusal\n'; pass=$((pass + 1))
+else
+  printf 'FAIL the authority propagates the reader refusal — expected exit 2, got %s\n' "$AUTH_CODE"; fail=$((fail + 1))
+fi
+printf '#!/bin/sh\nexit 0\n' > "$AUTH_DIR/read-secret-guard-bash.sh"
+jq -nc '{tool_input:{command:"echo hi"}}' | bash "$AUTH_DIR/bash-secret-authority.sh" >/dev/null 2>&1
+AUTH_OK=$?
+if [ "$AUTH_OK" -eq 0 ]; then
+  printf 'ok   a silent reader still allows\n'; pass=$((pass + 1))
+else
+  printf 'FAIL a silent reader still allows — expected exit 0, got %s\n' "$AUTH_OK"; fail=$((fail + 1))
+fi
+rm -rf "$AUTH_DIR"
+
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

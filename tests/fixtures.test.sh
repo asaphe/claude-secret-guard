@@ -67,6 +67,11 @@ expect_exit "the generator refuses an unknown shape" 64 "$?"
 LISTED=$(bash "$ROOT/scripts/fixture-value.sh" aws-access-key)
 FRESH=$(bash "$ROOT/scripts/fixture-value.sh" aws-access-key)
 check "the generator does not repeat itself" "two calls returned the same value" [ "$LISTED" != "$FRESH" ]
+# Fatal rather than a failed case: with either value empty, every exemption below runs on an empty string and reports ok for a guard that was never given anything to exempt.
+if [ -z "$LISTED" ] || [ -z "$FRESH" ]; then
+  printf 'FATAL: the generator produced an empty value — the exemption cases below would pass vacuously\n'
+  exit 1
+fi
 
 # --- the allowlist exempts exactly what it lists, on every content surface ------
 C=$(plugin_copy allow)
@@ -80,7 +85,11 @@ tool_write "$C" "$LISTED"
 expect_exit "a listed value passes the Write guard" 0 "$?"
 
 paste "$C" "here it is: $LISTED"
-check "a listed value passes the paste guard" "the prompt was blocked" [ ! -s "$WORK/out" ]
+PASTE_CODE=$?
+# The guard signals a block on stdout and exits 0, so an empty stdout alone cannot tell an exemption from a refusal that never printed one — the exit code and the notice are what separate them.
+expect_exit "a listed value passes the paste guard" 0 "$PASTE_CODE"
+check "the paste notice names the exemption" "no notice on stderr" grep -q 'allowed —' "$WORK/err"
+check "the paste guard emitted no block" "the prompt was blocked" [ ! -s "$WORK/out" ]
 # Control: the same guard on the same copy must still block an unlisted value, or the case above proves nothing.
 paste "$C" "here it is: $FRESH"
 check "an unlisted value blocks the paste guard" "the prompt was allowed" grep -q '"decision"' "$WORK/out"
@@ -93,16 +102,60 @@ expect_exit "one unlisted match blocks the whole call" 2 "$?"
 
 # --- entries the allowlist must refuse to honour -------------------------------
 C=$(plugin_copy pem)
-PEM_HEADER=$(bash "$ROOT/scripts/fixture-value.sh" pem-private-key | head -1)
-printf '\n%s\n%s\n' "$LISTED" "$PEM_HEADER" >> "$C/fixtures.allow"
-bash_write "$C" "printf '%s' $LISTED > /tmp/probe"
-check "a PEM header entry is refused and announced" "no notice" grep -q 'ignoring the PEM header entry' "$WORK/err"
+PEM_KEY=$(bash "$ROOT/scripts/fixture-value.sh" pem-private-key 2>/dev/null)
+PEM_HEADER=$(printf '%s\n' "$PEM_KEY" | head -1)
+if [ -n "$PEM_KEY" ] && [ -n "$PEM_HEADER" ]; then
+  printf '\n%s\n%s\n' "$LISTED" "$PEM_HEADER" >> "$C/fixtures.allow"
+  bash_write "$C" "printf '%s' $LISTED > /tmp/probe"
+  check "a PEM header entry is refused and announced" "no notice" grep -q 'ignoring the PEM header entry' "$WORK/err"
+  # The property is that the header buys nothing, which only a real key can show: the notice alone would still print if the entry were honoured.
+  tool_write "$C" "$PEM_KEY"
+  expect_exit "listing the header does not exempt a real key" 2 "$?"
+else
+  bad "a PEM header entry is refused and announced" "the generator produced no PEM key"
+  bad "listing the header does not exempt a real key" "the generator produced no PEM key"
+fi
 
 C=$(plugin_copy partial)
 printf '\n%s\n' "${LISTED:0:8}" >> "$C/fixtures.allow"
 bash_write "$C" "printf '%s' $LISTED > /tmp/probe"
 expect_exit "a prefix entry does not exempt its full value" 2 "$?"
 check "the partial entry is announced" "no notice" grep -q 'not a complete value' "$WORK/err"
+
+# --- a fragment is not a complete value, even when a detection alternative matches it ---
+C=$(plugin_copy slack-prefix)
+SLACK=$(bash "$ROOT/scripts/fixture-value.sh" slack-bot-token)
+if [ -n "$SLACK" ]; then
+  # The team and bot IDs, which every rotation of the same credential shares; the shapes carry this prefix so a truncated token in source is still flagged, which is what let it pass as "complete".
+  TRUNC="${SLACK%-*}"
+  printf '\n%s\n' "$TRUNC" >> "$C/fixtures.allow"
+  tool_write "$C" "$SLACK"
+  expect_exit "a truncated token does not exempt the full one" 2 "$?"
+  check "the truncated entry is announced" "no notice" grep -q 'not a complete value' "$WORK/err"
+else
+  bad "a truncated token does not exempt the full one" "the generator produced no Slack token"
+  bad "the truncated entry is announced" "the generator produced no Slack token"
+fi
+
+# --- an open-ended shape lets one complete value be the prefix of another ------
+C=$(plugin_copy gitlab-prefix)
+GL=$(bash "$ROOT/scripts/fixture-value.sh" gitlab-pat)
+if [ -n "$GL" ]; then
+  LONGER="${GL}EXTRA"
+  printf '\n%s\n' "$GL" >> "$C/fixtures.allow"
+  tool_write "$C" "$GL"
+  expect_exit "the listed value alone is exempt" 0 "$?"
+  tool_write "$C" "$LONGER"
+  expect_exit "a longer value extending it blocks alone" 2 "$?"
+  # Subtracting the listed value by text stripped this prefix out of the neighbour too, leaving the residual check nothing to find.
+  tool_write "$C" "$GL
+$LONGER"
+  expect_exit "and still blocks beside the listed one" 2 "$?"
+else
+  bad "the listed value alone is exempt" "the generator produced no GitLab PAT"
+  bad "a longer value extending it blocks alone" "the generator produced no GitLab PAT"
+  bad "and still blocks beside the listed one" "the generator produced no GitLab PAT"
+fi
 
 # --- a missing allowlist blocks rather than exempting --------------------------
 C=$(plugin_copy missing)
