@@ -170,11 +170,33 @@ bash_write "$C" "printf 'a\\n$FRESH' | tee /tmp/probe"
 expect_exit "a key behind a \\n escape is still matched" 2 "$?"
 
 # --- an unreadable hook payload blocks on every guard --------------------------
+# One variant is not the class: empty stdin and a top-level null both parse, and only the mask guard checked the payload was an object at all.
 for g in paste-secret-guard read-secret-guard read-secret-guard-bash \
          write-secret-guard write-secret-guard-bash op-read-guard secret-mask-guard; do
   printf 'not json' | bash "$ROOT/scripts/$g.sh" >/dev/null 2>&1
   expect_exit "$g fails closed on an unparseable payload" 2 "$?"
+  printf '' | bash "$ROOT/scripts/$g.sh" >/dev/null 2>&1
+  expect_exit "$g fails closed on empty stdin" 2 "$?"
+  printf 'null' | bash "$ROOT/scripts/$g.sh" >/dev/null 2>&1
+  expect_exit "$g fails closed on a top-level null" 2 "$?"
 done
+
+# A .tool_input that is not an object makes the content filters error; an unchecked assignment left the value empty, which every check downstream reads as "nothing here".
+for g in read-secret-guard read-secret-guard-bash write-secret-guard write-secret-guard-bash op-read-guard secret-mask-guard; do
+  printf '{"tool_name":"Write","tool_input":"oops"}' | bash "$ROOT/scripts/$g.sh" >/dev/null 2>&1
+  expect_exit "$g fails closed on a non-object tool_input" 2 "$?"
+done
+
+# The MultiEdit filter errors on an edit that is not an object, which used to end only the substitution's subshell and let the write through.
+jq -nc --arg k "$FRESH" '{tool_name:"MultiEdit", tool_input:{edits:["junk", {new_string:$k}]}}' \
+  | bash "$ROOT/scripts/write-secret-guard.sh" >/dev/null 2>&1
+expect_exit "a malformed edits array blocks rather than passing" 2 "$?"
+jq -nc --arg k "$FRESH" '{tool_name:"MultiEdit", tool_input:{edits:[{new_string:$k}]}}' \
+  | bash "$ROOT/scripts/write-secret-guard.sh" >/dev/null 2>&1
+expect_exit "control: a well-formed edits array still blocks the key" 2 "$?"
+jq -nc '{tool_name:"MultiEdit", tool_input:{edits:[{new_string:"benign"}]}}' \
+  | bash "$ROOT/scripts/write-secret-guard.sh" >/dev/null 2>&1
+expect_exit "control: a benign multi-edit still passes" 0 "$?"
 
 # --- and one shape definition, not three ---------------------------------------
 COPIES=$(grep -lE "^PATTERN=" "$ROOT"/scripts/*.sh 2>/dev/null | wc -l | tr -d ' ')
