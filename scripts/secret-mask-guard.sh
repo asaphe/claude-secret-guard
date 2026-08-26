@@ -29,14 +29,8 @@ CMD="$STRIPPED"
 SCAN=$(normalize_cmd "$CMD")
 
 # Anchored to the subcommand position rather than to "anywhere after op": only op's own global flags and their values may precede it, or a word that happens to be spelled like a subcommand reads as one. The flag names are a closed set, so an unrelated command carrying both words in flag values is not an op invocation.
-OP_PRE='(^|[^[:alnum:]_-])op([[:space:]]+(--(account|config|session|format|encoding|cache|debug|no-color|iso-timestamps)([[:space:]=]+[^-[:space:]][^[:space:]]*)?|-[A-Za-z]+))*[[:space:]]+'
-
-# A destination is only a destination if the shell runs it: text after an unquoted # is a comment, and a redirect operator or an output flag inside quotes is an argument. All of these were honoured, so a trailing `# >/dev/null` was enough to clear the check.
-# Only quoted runs that could pass for a destination are blanked, so `op "document" get` still reads as the subcommand it is.
-DEST_SRC=$(printf '%s\n' "$CMD" | sed -E "s/(^|[[:space:]])#.*\$/\\1/" \
-  | sed -E "s/'[^']*[>|][^']*'/QUOTED_ARG/g; s/\"[^\"]*[>|][^\"]*\"/QUOTED_ARG/g" \
-  | sed -E "s/'[[:space:]]*-[^']*'/QUOTED_ARG/g; s/\"[[:space:]]*-[^\"]*\"/QUOTED_ARG/g")
-SCAN_DEST=$(normalize_cmd "$DEST_SRC")
+# A value may be a quoted run holding whitespace — `--config "/Application Support/op"` is an ordinary spelling, and a matcher that stopped at the first space silenced every predicate below.
+OP_PRE='(^|[^[:alnum:]_-])op([[:space:]]+(--(account|config|session|format|encoding|cache|debug|no-color|iso-timestamps)([[:space:]=]+("[^"]*"|'"'"'[^'"'"']*'"'"'|[^-[:space:]][^[:space:]]*))?|-[A-Za-z]+([[:space:]]+("[^"]*"|'"'"'[^'"'"']*'"'"'|[^-[:space:]][^[:space:]]*))?))*[[:space:]]+'
 
 # No wrapper-path early exit: a legitimate wrapper call does not match the fetch patterns below anyway, so all it could exempt was text that merely named the path — a trailing `# see scripts/op-cache.sh` used to clear the whole guard.
 # --- op read <uri> ---
@@ -60,7 +54,17 @@ fi
 # --- aws secretsmanager get-secret-value --secret-id <id> (single-secret only) ---
 # --- the other 1Password subcommands that print a value ---
 # Decided per segment: the flag that makes each of these dangerous has to belong to the same command, or `op item get X && op-cache.sh --reveal <uri>` reads as a revealing item-get.
-while IFS= read -r SEG; do
+# &> and >& are redirect operators, not command separators, so they are hidden from the split and restored inside the segment.
+# Restored through a variable, never as a literal: bash 5.2 made a bare & in a replacement expand to the matched text, so the literal spelling silently produces different output on either side of that release.
+SG_AMPGT='&>'
+SG_GTAMP='>&'
+SEG_SRC=${CMD//&>/$'\001'}
+SEG_SRC=${SEG_SRC//>&/$'\002'}
+# Split on the raw text and normalized per segment, so the two views stay paired and the flag checks below read a segment nothing has rewritten.
+while IFS= read -r SEG_RAW; do
+  SEG_RAW=${SEG_RAW//$'\001'/"$SG_AMPGT"}
+  SEG_RAW=${SEG_RAW//$'\002'/"$SG_GTAMP"}
+  SEG=$(normalize_cmd "$SEG_RAW")
   if echo "$SEG" | grep -qE "${OP_PRE}item[[:space:]]+get([[:space:]]|\$)" \
      && echo "$SEG" | grep -qE '(^|[[:space:]])--(reveal|otp)([[:space:]=]|$)'; then
     echo "SECRET-MASK GUARD: 'op item get' with --reveal or --otp prints the concealed value into this tool_result/transcript. Fetch the one field you need as a secret reference through the masked wrapper instead: \"${CLAUDE_PLUGIN_ROOT}\"/scripts/op-cache.sh --mask 'op://<vault>/<item>/<field>' — or drop the flag and the field stays concealed." >&2
@@ -76,23 +80,41 @@ while IFS= read -r SEG; do
   echo "$SEG" | grep -qE "${OP_PRE}(document[[:space:]]+get|inject)([[:space:]]|\$)" || continue
   # Only what follows the subcommand can be its own output flag; an -o earlier on the line belongs to another command, as in `ssh -o X host "op document get k"`.
   # Cut where the anchored pattern matched, not at the first literal spelling: `cat inject.tpl | op inject -i -` cut inside the filename, and the tail then held cat's pipe rather than op's own.
-  SEG_ONE=$(printf '%s' "$SEG" | tr -s '[:space:]' ' ')
-  SEG_TAIL=$(printf '%s' "$SEG_ONE" | awk -v pat="${OP_PRE}(document[[:space:]]+get|inject)" \
-    '{ if (match($0, pat)) print substr($0, RSTART + RLENGTH) }')
+  # Read from the raw segment with quote state tracked: normalization deletes the quotes that tell a redirect operator apart from an argument merely spelled like one, and a regex cannot pair quotes — blanking them with one ate the --reveal flag two checks above.
+  SEG_ONE=$(printf '%s' "$SEG_RAW" | tr -s '[:space:]' ' ')
+  SEG_TAIL=$(printf '%s' "$SEG_ONE" | awk -v pat="${OP_PRE}(document[[:space:]]+get|inject)" -v sq="'" '
+    {
+      if (!match($0, pat)) exit
+      tail = substr($0, RSTART + RLENGTH)
+      out = ""; q = ""
+      for (i = 1; i <= length(tail); i++) {
+        c = substr(tail, i, 1)
+        if (q == "") {
+          if (c == "\"" || c == sq) { q = c; out = out " "; continue }
+          if (c == "#" && (i == 1 || substr(tail, i - 1, 1) == " ")) break
+          out = out c
+        } else {
+          if (c == q) { q = ""; out = out " "; continue }
+          out = out "x"
+        }
+      }
+      print out
+    }')
   # strip_cmd's own placeholder carries a >> that is not a redirect.
   SEG_TAIL=${SEG_TAIL//<<STRIPPED_HEREDOC>>/}
   # Named before any destination is honoured: stdout under another name is not somewhere else for the value to go.
-  if echo "$SEG_TAIL" | grep -qE '(--out-file|-o|>>?)[[:space:]=]*(/dev/(stdout|fd/[0-9]+)|-)([[:space:]]|$)'; then
+  if echo "$SEG_TAIL" | grep -qE '(--out-file|-o|&?>>?|>&)[[:space:]=]*(/dev/(stdout|fd/[0-9]+)|-)([[:space:]]|$)'; then
     :
-  # A pipe or a stdout redirect sends the value to a process or a file rather than to the transcript. `2>` does not, so only a bare or 1-prefixed operator counts, and `>&2` is an fd duplicate rather than a file.
+  # A pipe or a redirect that names a file sends the value somewhere the transcript does not see. `2>` does not, and `>&N`/`>&-` duplicate or close a descriptor rather than naming a file — but `&>f`, `&>>f` and `>&f` do reach one.
   elif echo "$SEG_TAIL" | grep -qE '(^|[[:space:]])(--out-file([[:space:]=]|$)|-o([[:space:]=/]|$))' \
     || echo "$SEG_TAIL" | grep -qE '\|' \
-    || echo "$SEG_TAIL" | grep -qE '(^|[[:space:]])1?>>?[[:space:]]*[^&[:space:]]'; then
+    || echo "$SEG_TAIL" | grep -qE '(^|[[:space:]])(&?>>?|1>>?)[[:space:]]*[^&[:space:]]' \
+    || echo "$SEG_TAIL" | grep -qE '(^|[[:space:]])>&[[:space:]]*[^0-9&[:space:]-]'; then
     continue
   fi
   echo "SECRET-MASK GUARD: 'op document get' and 'op inject' print the resolved secret to stdout, which is this tool_result/transcript. Give it somewhere else to go — --out-file <path> (op creates that file 0600), a redirect, or a pipe into whatever consumes it." >&2
   exit 2
-done < <(echo "$SCAN_DEST" | tr ';&' '\n')
+done < <(printf '%s\n' "$SEG_SRC" | tr ';&' '\n')
 
 # --- aws secretsmanager get-secret-value --secret-id <id> (single-secret only) ---
 if echo "$SCAN" | grep -qE '(^|[^[:alnum:]_-])(aws|rtk aws)[[:space:]]([^|;&]* )?secretsmanager[[:space:]]+get-secret-value([[:space:]]|$)'; then

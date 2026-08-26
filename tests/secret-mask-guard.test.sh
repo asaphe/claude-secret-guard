@@ -195,6 +195,38 @@ for bin in perl jq; do
 done
 trap 'rm -rf "$STUB" "$STUB-perl" "$STUB-jq"' EXIT
 
+# --- a quoted argument is an argument, and quotes cannot be paired by a regex ---
+# Blanking quoted runs with a sed pattern paired the CLOSING quote of one argument with the OPENING quote of the next, so everything between them — including the flag this check exists to find — was erased.
+run BLOCK "reveal between two quoted args"    "op $IG \"My Item\" --reveal --format \"json\""
+run BLOCK "otp between two quoted args"       "op $IG \"My Item\" --otp --format \"json\""
+run BLOCK "reveal between single-quoted args" "op $IG 'My Item' --reveal --fields 'password'"
+run BLOCK "no-masking quoted"                 "op run \"--no-masking\" -- printenv"
+# The same pairing bug in the other direction: an ordinary redirect swallowed by the blank.
+run ALLOW "quoted item, quoted destination"   "op $DG \"My Doc\" > \"/tmp/out\""
+run ALLOW "quoted item, quoted out-file"      "op $DG \"My Doc\" --out-file \"/tmp/out\""
+run ALLOW "single-quoted both"                "op $DG 'My Doc' > '/tmp/out'"
+run ALLOW "variables for both, quoted"        "op inject -i \"\$TPL\" > \"\$OUT\""
+run ALLOW "a # inside a quoted argument"      "op $DG \"a # b\" > /tmp/f"
+
+# --- op's own global flags may carry a quoted value holding whitespace ---
+# The value matcher stopped at the first space, so every predicate below went silent — including the raw-read block, which is a fetch reaching the transcript.
+run BLOCK "quoted --config with a space"      "op --config \"/Application Support/op\" $R $U"
+run BLOCK "quoted --account with a space"     "op --account \"my acct\" $R $U"
+run BLOCK "quoted --config then item get"     "op --config \"/a b\" $IG X --reveal"
+run BLOCK "quoted --config then document get" "op --config \"/a b\" $DG k"
+run BLOCK "short flag carrying a value"       "op -a acct $R $U"
+run BLOCK "short flag with a format value"    "op -f json $R $U"
+
+# --- &> and >& reach a file; >&N and >&- do not ---
+# These also pin the segment split: & is a separator except when it is part of a redirect operator.
+run ALLOW "ampersand redirect to a file"      "op inject -i x &> out.env"
+run ALLOW "ampersand append to a file"        "op inject -i x &>> out.env"
+run ALLOW "reversed ampersand to a file"      "op inject -i x >& out.env"
+run BLOCK "duplicate onto stderr"             "op inject -i x >&2"
+run BLOCK "descriptor closed"                 "op inject -i x >&-"
+run BLOCK "ampersand redirect to stdout"      "op inject -i x &> /dev/stdout"
+run BLOCK "&& still splits the segment"       "op $DG k && scp -o StrictHostKeyChecking=no a b"
+
 # --- a destination only counts when the shell would run it ---
 # Text after an unquoted # is a comment and a redirect character inside quotes is an argument; both were honoured, so a trailing comment cleared the check while the value still went to stdout.
 run BLOCK "a commented-out redirect"         "op $DG key # > /tmp/k"

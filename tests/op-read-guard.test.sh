@@ -66,5 +66,13 @@ run ALLOW "the genuine read of that one too"         "op read op://Vault/Msg/f"
 run ALLOW "a heredoc piped to a shell is a fetch"    "$(printf 'cat <<%sEOF%s | bash\nop read op://Vault/Exec/f\nEOF' "$Q" "$Q")"
 run BLOCK "so the read after it is a duplicate"      "op read op://Vault/Exec/f"
 
+# A heredoc body is data only until something runs the file it was written to; masking it unconditionally hid a fetch that executes a few bytes later.
+run ALLOW "a script written by heredoc is a fetch"    "$(printf 'cat <<%sEOF%s > /tmp/x.sh\nop read op://Vault/Script/f\nEOF\nbash /tmp/x.sh' "$Q" "$Q")"
+run BLOCK "so the read after it is a duplicate"       "op read op://Vault/Script/f"
+run ALLOW "the same via tee then sh"                  "$(printf 'tee /tmp/y.sh <<%sEOF%s >/dev/null\nop read op://Vault/Teed/f\nEOF\nsh /tmp/y.sh' "$Q" "$Q")"
+run BLOCK "and that one dedupes too"                  "op read op://Vault/Teed/f"
+run ALLOW "a runbook with an unrelated command after" "$(printf 'cat <<%sEOF%s > guide.md\nrun: op read op://Vault/Guide/f\nEOF\necho done' "$Q" "$Q")"
+run ALLOW "its genuine read is still first"           "op read op://Vault/Guide/f"
+
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]
