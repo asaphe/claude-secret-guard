@@ -18,8 +18,9 @@ text you're certifying.
 ## Before opening a PR
 
 ```sh
-shellcheck -x scripts/*.sh
-for f in scripts/*.sh; do bash -n "$f"; done
+shellcheck -x scripts/*.sh tests/*.sh
+for f in scripts/*.sh tests/*.sh; do bash -n "$f"; done
+for t in tests/*.test.sh; do bash "$t"; done
 jq empty .claude-plugin/plugin.json .claude-plugin/marketplace.json hooks/hooks.json
 ```
 
