@@ -59,9 +59,8 @@ masked-cache wrappers.
 `secret-mask-guard.sh` is the one stage here that exists to stop a
 plaintext secret reaching the transcript, so it refuses anything it
 cannot actually inspect: an empty or non-JSON hook payload, or command
-text it cannot normalize because `jq` or `perl` is unavailable. In each
-case it blocks with a message naming the missing tool, rather than
-letting the command run unchecked.
+text it cannot read because `jq` is unavailable. It blocks with a message
+naming the missing tool, rather than letting the command run unchecked.
 
 **Every stage does the same for `jq` specifically.** An unreadable hook
 payload blocks the call rather than being read as "nothing to inspect" —
@@ -83,7 +82,11 @@ prose-carrying flags like `--body` and `-m` — so writing a PR body or a
 commit message *about* `op read` is not treated as performing one. A
 region that can still execute is never masked: a flag value or bare
 heredoc body containing `$(…)` or backticks stays visible to the
-predicate, because that text does run.
+predicate, because that text does run. So does a body fed to an
+interpreter, wherever the interpreter sits on that line — before the
+operator (`python3 <<'EOF'`) or after it (`cat <<'EOF' | python3`). An
+ordinary destination on the same line (`cat <<'EOF' > file`,
+`| tee file`) leaves the body masked and is preserved as written.
 
 ### Respellings the predicates normalize
 
@@ -296,8 +299,12 @@ allowlist, so a scanner would ignore the value regardless.
 - `op document get` and `op inject` are allowed when their output has somewhere
   to go that is not the transcript: `--out-file`/`-o`, a stdout redirect, or a
   pipe. A pipe whose *consumer* prints the value — `op inject -i x | cat` — is
-  therefore not blocked, and the check reads flags rather than resolving a path,
-  so an argument that merely contains `-o` inside a quoted value satisfies it.
+  therefore not blocked. Only a destination the shell would actually run counts:
+  text after an unquoted `#` is dropped as a comment, a redirect operator or
+  output flag inside quotes is read as the argument it is, and the pipe has to be
+  the fetch's own — one *feeding* `op` is not a destination for what `op` prints.
+  The check still reads flags rather than resolving a path, so it does not verify
+  that the named file is anywhere sensible.
 - Normalization covers every respelling that still spells the verb as adjacent
   words. One assembled from a variable or an expansion — `$OP read`,
   `op ${VERB}` — still passes.

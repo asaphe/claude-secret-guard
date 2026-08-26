@@ -16,6 +16,13 @@ if [ -z "$CMD" ]; then
   exit 0
 fi
 
+# shellcheck source=scripts/strip-cmd.sh
+source "$(dirname "${BASH_SOURCE[0]}")/strip-cmd.sh"
+# Without this a commit message or a heredoc quoting a reference is recorded as a fetch, so the real fetch of it is later refused as a duplicate.
+CMD=$(strip_cmd "$CMD")
+# Same normalization the mask guard matches on, so `op "item" get` keys the same entry as `op item get` rather than fetching twice.
+CMD=$(normalize_cmd "$CMD")
+
 if ! echo "$CMD" | grep -qE '(^|[^[:alnum:]_-])op[[:space:]]([^|;&]* )?read([[:space:]]|$)'; then
   if ! echo "$CMD" | grep -qE '(^|[^[:alnum:]_-])op[[:space:]]([^|;&]* )?item +get([[:space:]]|$)'; then
     exit 0

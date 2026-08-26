@@ -195,8 +195,44 @@ for bin in perl jq; do
 done
 trap 'rm -rf "$STUB" "$STUB-perl" "$STUB-jq"' EXIT
 
+# --- a destination only counts when the shell would run it ---
+# Text after an unquoted # is a comment and a redirect character inside quotes is an argument; both were honoured, so a trailing comment cleared the check while the value still went to stdout.
+run BLOCK "a commented-out redirect"         "op $DG key # > /tmp/k"
+run BLOCK "a commented-out pipe"             "op inject -i x # | kubectl apply -f -"
+run BLOCK "a commented-out out-file"         "op inject -i x #--out-file /tmp/o"
+run BLOCK "a redirect inside a flag value"   "op $DG key --tags '>/tmp/x'"
+run BLOCK "an out-file inside a flag value"  "op $DG key --tags '--out-file=/tmp/x'"
+run BLOCK "a -o inside a flag value"         "op $DG key --tags '-o=/tmp/x'"
+run ALLOW "the same redirect uncommented"    "op $DG key > /tmp/k"
+run ALLOW "the same pipe uncommented"        "op inject -i x | kubectl apply -f -"
+run ALLOW "a # inside the path is not one"   "op $DG key > /tmp/k#1"
+
+# --- the pipe has to be op's own, not one feeding it ---
+# The cut landed on the first literal spelling of the subcommand, so a filename carrying it left cat's pipe in op's tail.
+run BLOCK "a pipe into op inject"            "cat inject.tpl | op inject -i -"
+run BLOCK "a pipe into a bare op inject"     "cat inject.tpl | op inject"
+run ALLOW "control: op's own pipe outward"   "op inject -i inject.tpl | kubectl apply -f -"
+
+# --- op is a command, and its subcommand is a position ---
+# The gap between the two was unbounded, so any word after op reached the subcommand test and an ordinary argument spelled like one became a hard block.
+run ALLOW "an item named inject"             "op $IG inject"
+run ALLOW "a --fields value of inject"       "op $IG X --fields inject"
+run ALLOW "a --tags value of inject"         "op $IG X --tags inject"
+run ALLOW "a run target named inject"        "op run -- npm run inject"
+run ALLOW "grep for inject after a pipe"     "op whoami | grep inject"
+run ALLOW "two --grep values, op then read"  "git log --grep \"op\" --grep \"$R\""
+run ALLOW "two quoted words in an echo"      "echo \"op\" and \"$R\""
+run BLOCK "control: op with a valued flag"   "op --account acme inject -i x"
+run BLOCK "control: op with a boolean flag"  "op --debug inject -i x"
+run BLOCK "control: behind sudo"             "sudo op inject -i x"
+run BLOCK "control: op's own global flag"    "op --account acme $R $U"
+
 run_without perl BLOCK "perl unavailable, real read" "op $R $U"
 run_without jq   BLOCK "jq unavailable, real read"   "op $R $U"
+# The other half of that trade: strip_cmd degrades to the unmodified command rather than to empty, so an ordinary command must still pass without perl instead of every Bash call becoming a block.
+run_without perl ALLOW "perl unavailable, benign command" "ls -la"
+run_without perl ALLOW "perl unavailable, git status"     "git status"
+run_without perl ALLOW "perl unavailable, an echo"        "echo hi"
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]
