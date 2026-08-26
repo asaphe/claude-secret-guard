@@ -235,14 +235,12 @@ allowlist, so a scanner would ignore the value regardless.
   The check still reads flags rather than resolving a path, so it does not verify
   that the named file is anywhere sensible.
 - Normalization covers every respelling that still spells the verb as adjacent
-  words. One assembled from a variable or an expansion — `$OP read`,
-  `op ${VERB}` — still passes.
+  words. A verb assembled at runtime from an expansion is not matched.
 - On the AWS side only Secrets Manager carries a predicate.
   `aws ssm get-parameter --with-decryption`, `aws kms decrypt` and
   `aws sts get-session-token` all print a plaintext value and none is matched.
 - The reader list in the ask gate is closed — `cat`, `head`, `tail`, `less`,
-  `more`, `grep`. A file read by `bat`, `xxd`, `od`, `strings`, `base64`,
-  `openssl`, or an inline `python3 -c "open(...)"` does not reach the basename
+  `more`, `grep`. A file read by any other program does not reach the basename
   patterns.
 
 ## License
