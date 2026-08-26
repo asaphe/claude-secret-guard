@@ -8,13 +8,20 @@ INPUT=$(cat)
 CMD=$(echo "$INPUT" | jq -r '.tool_input.command // empty')
 [ -z "$CMD" ] && exit 0
 
+# shellcheck source=scripts/strip-cmd.sh
+source "$(dirname "${BASH_SOURCE[0]}")/strip-cmd.sh"
+# normalize_cmd only, never strip_cmd: this is the one guard whose payload IS the heredoc body, so masking it would hide the very text being written.
+# Both spellings are scanned as two lines rather than the normalized one alone: the raw line is where an escape is part of the secret's own boundary, and normalization would narrow a predicate that matches on a quote character.
+WRITE_SCAN=$(printf '%s\n%s' "$CMD" "$(normalize_cmd "$CMD")")
+
 IS_WRITE=0
-echo "$CMD" | grep -qE '<<[-~]?[[:space:]]*"?'"'"'?[A-Za-z_]' && IS_WRITE=1
-echo "$CMD" | grep -qE '\btee\b' && IS_WRITE=1
-echo "$CMD" | grep -qE '[^0-9&]>>?[^&]' && IS_WRITE=1
+echo "$WRITE_SCAN" | grep -qE '<<[-~]?[[:space:]]*"?'"'"'?[A-Za-z_]' && IS_WRITE=1
+echo "$WRITE_SCAN" | grep -qE '\btee\b' && IS_WRITE=1
+echo "$WRITE_SCAN" | grep -qE '[^0-9&]>>?[^&]' && IS_WRITE=1
 [ "$IS_WRITE" -eq 0 ] && exit 0
 
-if echo "$CMD" | grep -qE -- "$PATTERN"; then
+# The same two lines the writer test used: quoting AKIA''XT... out of one shape is exactly how a literal reaches a file unseen, which is the split this guard tells the caller not to perform.
+if echo "$WRITE_SCAN" | grep -qE -- "$PATTERN"; then
   echo "WRITE-SECRET GUARD: this command writes to a file and embeds a raw secret-shaped literal (private key / AWS access key / Slack bot token / GitLab PAT). Use a reference (env var, masked-cache path) instead of the literal value — never hardcode it into a script. Writing a secret-scanner allowlist (.gitleaks.toml, .gitleaksignore) is exempt only via the Write/Edit tools, which check the target path; this Bash path cannot verify it." >&2
   exit 2
 fi

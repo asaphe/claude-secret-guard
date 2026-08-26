@@ -21,11 +21,13 @@ closes the highest-value slice of that surface:
    than one that only ever touched a local log, since the script can get
    committed and shared.
 3. **Reading an existing secret file** (`PreToolUse` on `Read`, plus the
-   Bash equivalent for `cat`/`head`/`tail`/`grep -r`) — an "ask" gate (not a
-   hard block) on filenames that look like live secrets: `.env`, private
-   keys, kubeconfigs.
+   Bash equivalent for `cat`/`head`/`tail`/`less`/`more`/`grep`) — an "ask"
+   gate (not a hard block) on filenames that look like live secrets: `.env`,
+   private keys, kubeconfigs.
 4. **Fetching a secret from a manager and printing it raw** (`PreToolUse`
-   on `Bash`) — blocks `op read` and `aws secretsmanager get-secret-value`/
+   on `Bash`) — blocks `op read`, `op item get --reveal`/`--otp`,
+   `op document get` and `op inject` with nowhere but stdout to send the
+   value, `op run --no-masking`, and `aws secretsmanager get-secret-value`/
    `batch-get-secret-value` when called directly, and points at the masked
    wrapper scripts instead (see below).
 
@@ -57,9 +59,15 @@ masked-cache wrappers.
 `secret-mask-guard.sh` is the one stage here that exists to stop a
 plaintext secret reaching the transcript, so it refuses anything it
 cannot actually inspect: an empty or non-JSON hook payload, or command
-text it cannot normalize because `jq` or `perl` is unavailable. In each
-case it blocks with a message naming the missing tool, rather than
-letting the command run unchecked. The other stages are UX guards
+text it cannot read because `jq` is unavailable. It blocks with a message
+naming the missing tool, rather than letting the command run unchecked.
+
+`perl` is the deliberate exception. `strip-cmd.sh` degrades to the
+*unmodified* command when `perl` cannot run, so the predicates still see
+the raw text and a real fetch is still blocked. Returning empty instead
+would hit every caller's "nothing to inspect" early exit and disarm the
+guard; blocking every `Bash` call would make an absent interpreter a hard
+outage. Neither trade is necessary. The other stages are UX guards
 (duplicate-read suppression, confirm-before-read prompts) and correctly
 fail open — a broken dependency there costs a prompt, not a secret.
 
@@ -70,7 +78,43 @@ prose-carrying flags like `--body` and `-m` — so writing a PR body or a
 commit message *about* `op read` is not treated as performing one. A
 region that can still execute is never masked: a flag value or bare
 heredoc body containing `$(…)` or backticks stays visible to the
-predicate, because that text does run.
+predicate, because that text does run. So does a body fed to an
+interpreter, wherever the interpreter sits on that line — before the
+operator (`python3 <<'EOF'`) or after it (`cat <<'EOF' | python3`). An
+ordinary destination on the same line (`cat <<'EOF' > file`,
+`| tee file`) leaves the body masked and is preserved as written.
+
+### Respellings the predicates normalize
+
+A predicate matches the verb as written, one line at a time, so a rewrite that
+changes the bytes without changing what the shell runs used to walk straight
+past it. All of these were ordinary fetches that reached the transcript
+unblocked: a backslash-newline continuation inside the matched phrase (`op \`
+then `read op://…`), a quoted subcommand (`op "read" op://…`), a binary name
+split across a quote (`o"p" read op://…`), a backslash inside either word
+(`o\p read`, `op re\ad`), the `$'…'` and `$"…"` quoting forms, and a tab where
+the two-word verbs spelled their separator as a literal space.
+
+`normalize_cmd()` in `scripts/strip-cmd.sh` undoes exactly that — it joins
+continuations, deletes backslashes, and unwraps a quote pair — and the guards
+match on its output. **A quote pair holding whitespace is deliberately left
+alone**, because that is the only thing separating a command that *performs*
+the fetch from one that *searches for the phrase*: without the exception,
+`grep -rn "op read" .` becomes a hard block with no approval path.
+
+Order matters twice. `strip_cmd()` masks prose first, so the placeholder left
+behind is a bare word and unwrapping quotes cannot re-expose a commit message.
+And normalization is not the universal widening it looks like: it widens a
+predicate that matches on words, but *narrows* one that matches on a quote
+character. `write-secret-guard-bash.sh` therefore scans the raw and the
+normalized spelling as two lines and takes either.
+
+There is no longer a wrapper-path exemption. A legitimate `op-cache.sh` call
+does not match the fetch predicates anyway, so all the exemption could ever
+clear was text that merely *named* the path — a trailing
+`# see scripts/op-cache.sh` used to turn a real fetch into a pass. For the same
+reason `op read` is no longer conditioned on the absence of `op item get`: one
+command can carry both, and the raw read still needs blocking.
 
 ## Flag masking and filenames
 
@@ -173,6 +217,31 @@ allowlist, so a scanner would ignore the value regardless.
 - No coverage for exotic exfiltration paths (e.g. a secret smuggled through
   a base64-encoded blob) — this guards the direct, common cases, not an
   adversarial one.
+- The 1Password predicates key on the flags the CLI itself documents as
+  revealing — `--reveal` and `--otp` on `item get`, no stdout-avoiding
+  destination on `document get` and `inject`, `--no-masking` on `run`. A
+  subcommand or output format that prints a concealed value without one of
+  those is not matched, and nothing here verifies that `op run` really does
+  mask its subprocess's output. Each flag is looked for in the fetch's own
+  `;`/`&`-delimited segment, so `op item get X && op-cache.sh --reveal <uri>`
+  is two commands and not a revealing item-get.
+- `op document get` and `op inject` are allowed when their output has somewhere
+  to go that is not the transcript: `--out-file`/`-o`, a stdout redirect, or a
+  pipe. A pipe whose *consumer* prints the value — `op inject -i x | cat` — is
+  therefore not blocked. Only a destination the shell would actually run counts:
+  text after an unquoted `#` is dropped as a comment, a redirect operator or
+  output flag inside quotes is read as the argument it is, and the pipe has to be
+  the fetch's own — one *feeding* `op` is not a destination for what `op` prints.
+  The check still reads flags rather than resolving a path, so it does not verify
+  that the named file is anywhere sensible.
+- Normalization covers every respelling that still spells the verb as adjacent
+  words. A verb assembled at runtime from an expansion is not matched.
+- On the AWS side only Secrets Manager carries a predicate.
+  `aws ssm get-parameter --with-decryption`, `aws kms decrypt` and
+  `aws sts get-session-token` all print a plaintext value and none is matched.
+- The reader list in the ask gate is closed — `cat`, `head`, `tail`, `less`,
+  `more`, `grep`. A file read by any other program does not reach the basename
+  patterns.
 
 ## License
 

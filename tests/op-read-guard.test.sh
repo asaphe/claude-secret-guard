@@ -55,5 +55,27 @@ run ALLOW "malformed json fails open"                ""
 run ALLOW "op item get with no item fails open"      "op item get --format json"
 run ALLOW "unbalanced quote fails open"              "op item get $I --fields 'unclosed"
 
+# A commit message or a runbook quoting a reference describes a fetch rather than performing one; keying the tracker on it refused the real read of that reference as a duplicate.
+Q="'"
+run ALLOW "a heredoc documenting a reference"        "$(printf 'cat <<%sEOF%s > runbook.md\nrun: op read op://Vault/Doc/f\nEOF' "$Q" "$Q")"
+run ALLOW "the genuine read of it is still first"    "op read op://Vault/Doc/f"
+run BLOCK "and only then does it dedupe"             "op read op://Vault/Doc/f"
+run ALLOW "a commit message naming a reference"      "git commit -m 'use op read op://Vault/Msg/f here'"
+run ALLOW "the genuine read of that one too"         "op read op://Vault/Msg/f"
+# Piping the body to an interpreter runs it, so that spelling must still count as a fetch.
+run ALLOW "a heredoc piped to a shell is a fetch"    "$(printf 'cat <<%sEOF%s | bash\nop read op://Vault/Exec/f\nEOF' "$Q" "$Q")"
+run BLOCK "so the read after it is a duplicate"      "op read op://Vault/Exec/f"
+
+# A heredoc body is data only until something runs the file it was written to; masking it unconditionally hid a fetch that executes a few bytes later.
+run ALLOW "a script written by heredoc is a fetch"    "$(printf 'cat <<%sEOF%s > /tmp/x.sh\nop read op://Vault/Script/f\nEOF\nbash /tmp/x.sh' "$Q" "$Q")"
+run BLOCK "so the read after it is a duplicate"       "op read op://Vault/Script/f"
+run ALLOW "the same via tee then sh"                  "$(printf 'tee /tmp/y.sh <<%sEOF%s >/dev/null\nop read op://Vault/Teed/f\nEOF\nsh /tmp/y.sh' "$Q" "$Q")"
+run BLOCK "and that one dedupes too"                  "op read op://Vault/Teed/f"
+# Named again means the whole path, not a prefix of one: a substring test kept every runbook visible whose destination happened to prefix a later word.
+run ALLOW "a path that only prefixes a later one"     "$(printf 'cat <<%sEOF%s > /tmp/run\nrun: op read op://Vault/Prefix/f\nEOF\necho /tmp/runtime' "$Q" "$Q")"
+run ALLOW "its genuine read is still first"           "op read op://Vault/Prefix/f"
+run ALLOW "a runbook with an unrelated command after" "$(printf 'cat <<%sEOF%s > guide.md\nrun: op read op://Vault/Guide/f\nEOF\necho done' "$Q" "$Q")"
+run ALLOW "its genuine read is still first"           "op read op://Vault/Guide/f"
+
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

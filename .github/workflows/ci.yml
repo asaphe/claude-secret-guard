@@ -18,10 +18,12 @@ jobs:
       - name: bash syntax check
         run: for f in scripts/*.sh tests/*.sh; do bash -n "$f"; done
       - name: guard behaviour tests
+        # Globbed rather than listed, so a suite added later cannot pass CI by never running.
         run: |
-          bash tests/op-read-guard.test.sh
-          bash tests/secret-mask-guard.test.sh
-          bash tests/read-secret-guard-bash.test.sh
+          shopt -s nullglob
+          suites=(tests/*.test.sh)
+          [ "${#suites[@]}" -gt 0 ] || { echo "no test suites found"; exit 1; }
+          for t in "${suites[@]}"; do echo "== $t"; bash "$t"; done
       - name: validate JSON
         run: |
           jq empty .claude-plugin/plugin.json

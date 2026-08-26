@@ -34,6 +34,35 @@ run() {
 PEM=secrets.pem
 KEY=server.key
 
+# --- the reader is matched anywhere in a segment, not after a fixed wrapper list ---
+run ASK "reader behind timeout"               "timeout 5 cat $PEM"
+run ASK "reader behind nice"                  "nice cat $PEM"
+run ASK "reader behind stdbuf"                "stdbuf -o0 cat $PEM"
+run ASK "reader behind ionice"                "ionice -c3 cat $PEM"
+run ASK "absolute path to cat"                "/bin/cat $PEM"
+run ASK "relative path to head"               "./bin/head $PEM"
+run ASK "redirect glued to the reader"        "cat<$PEM"
+# The suffix patterns survive the glue; the anchored ones do not, so a glued token has to be split.
+run ASK "glued redirect before dotenv"        "cat<.env"
+run ASK "glued redirect before an ssh key"    "cat<id_rsa"
+run ASK "glued redirect before a kubeconfig"  "cat<kubeconfig"
+run ASK "glued redirect under grep"           "grep NEEDLE<$KEY"
+run SILENT "glued redirect, ordinary file"    "cat<README.md"
+
+# --- grep is gated whether or not it recurses: -r decides how many files are read, not whether one is a key ---
+run ASK "non-recursive -f names a pem"        "grep -f $PEM ."
+run ASK "non-recursive grep of a key"         "grep AKIA $KEY"
+run ASK "non-recursive grep of dotenv"        "grep TOKEN .env"
+run SILENT "non-recursive grep of a log"      "grep needle app.log"
+
+# --- a respelled reader name reaches the gate too, like the mask guard's verbs ---
+run ASK "quoted reader name"                  "\"cat\" $PEM"
+run ASK "reader split across a quote"         "c\"a\"t $PEM"
+run ASK "escaped reader name"                 "\\cat $PEM"
+
+# --- ordinary commands must stay silent ---
+run SILENT "path reader over a plain file"    "/bin/cat README.md"
+
 # --- quoted filenames: the reported bypass -------------------------------------
 run ASK "unquoted pem"                        "cat $PEM"
 run ASK "double-quoted pem"                   "cat \"$PEM\""
