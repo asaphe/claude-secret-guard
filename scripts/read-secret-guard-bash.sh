@@ -34,6 +34,22 @@ ask() {
   exit 0
 }
 
+# What the prompt can honestly say about a pattern that is never expanded for the verdict — an absolute glob has no cwd dependence, so naming its matches is reproducible where naming a relative one's would not be; see README § What an unresolved glob prompt says.
+describe_glob() {
+  local p="$1" hits n
+  # shellcheck disable=SC2088  # the literal ~ is what tokenize hands over; expanding it is the point
+  case "$p" in "~/"*) p="${HOME}/${p#\~/}" ;; esac
+  case "$p" in
+    /*) ;;
+    *) printf "not expanded here, since this hook's working directory is not the command's"; return ;;
+  esac
+  # Names only, never contents: the contents are the thing this prompt exists to withhold.
+  hits=$(compgen -G "$p" 2>/dev/null)
+  [ -n "$hits" ] || { printf 'it matches nothing under that path right now, but expands when the command runs'; return; }
+  n=$(printf '%s\n' "$hits" | grep -c .)
+  printf 'it matches %s file(s): %s' "$n" "$(printf '%s\n' "$hits" | head -6 | sed 's@.*/@@' | tr '\n' ' ' | sed 's/ $//')"
+}
+
 # Shell-aware split: a quoted filename must lose its quotes before the basename patterns see it, and no token may be glob-expanded against the cwd.
 tokenize() {
   printf '%s' "$1" | perl -0777 -e '
@@ -51,11 +67,34 @@ tokenize() {
   '
 }
 
+# The exemption below is armed by a `find` TOKEN and disarmed by the next reader token, so it is live only inside the window where find's own grammar governs — see README § Why a negated find predicate is exempt.
+RE_FIND_TOK='^([A-Za-z_][A-Za-z0-9_]*=)?\$?(.*/)?find$'
+RE_READER_TOK='^(.*/)?(cat|head|tail|less|more|grep)$'
+FIND_ACTIVE=""
+PREV=""
+PREV2=""
+PREV3=""
+
 while IFS= read -r -d '' token; do
+  # A SINGLY negated find predicate whose operand is a WILDCARD can only SHRINK the set of files touched, so it is never a read target; a second negation makes it positive again and a literal operand is indistinguishable from a filename — see README § Why a negated find predicate is exempt.
+  if [ -n "$FIND_ACTIVE" ] \
+     && [[ $PREV =~ ^-(i?path|i?name|i?wholename|i?regex)$ ]] \
+     && { [ "$PREV2" = "-not" ] || [ "$PREV2" = "!" ]; } \
+     && [ "$PREV3" != "-not" ] && [ "$PREV3" != "!" ] \
+     && [[ $token == *[*?]* ]]; then
+    PREV3=$PREV2; PREV2=$PREV; PREV=$token
+    continue
+  fi
+  if [[ $token =~ $RE_FIND_TOK ]]; then
+    FIND_ACTIVE=1
+  elif [[ $token =~ $RE_READER_TOK ]]; then
+    FIND_ACTIVE=""
+  fi
+  PREV3=$PREV2; PREV2=$PREV; PREV=$token
   BASENAME=$(basename -- "$token" 2>/dev/null)
   # A glob is not expanded here, so judge the pattern by what it could match rather than by the cwd.
   if printf '%s' "$token" | grep -qE '[*?]' && { printf '%s' "$BASENAME" | grep -qE '^\.env|^[*?]+$' || printf '%s' "$token" | grep -qE '(^|/)\.ssh/'; }; then
-    ask "READ-SECRET GUARD: $token is an unresolved glob that could match a secret file — confirm before its contents enter context/transcript."
+    ask "READ-SECRET GUARD: $token is an unresolved glob that could match a secret file — $(describe_glob "$token"). Confirm before its contents enter context/transcript."
   fi
   if printf '%s' "$BASENAME" | grep -qE '^-*\.env(\..+)?$' && ! printf '%s' "$BASENAME" | grep -qE '^-*\.env\.(example|sample|template)$'; then
     ask "READ-SECRET GUARD: $BASENAME looks like a live env file — confirm before its contents enter context/transcript."

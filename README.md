@@ -149,11 +149,68 @@ splitting. Splitting on whitespace left quote characters attached, so
 falls back to a bare split with quotes removed, so the gate still asks
 rather than going silent.
 
-Globs are not expanded, since the hook's working directory is not
-necessarily the one the command will run in, and a verdict that depends
-on it is not reproducible. An unresolved pattern is judged by what it
-could match instead: `cat *`, `cat .env*` and `cat .ssh/*` all ask,
-while `cat *.log` does not.
+Globs are not expanded for the *verdict*, since the hook's working
+directory is not necessarily the one the command will run in, and a
+verdict that depends on it is not reproducible. An unresolved pattern is
+judged by what it could match instead: `cat *`, `cat .env*` and
+`cat .ssh/*` all ask, while `cat *.log` does not.
+
+### What an unresolved glob prompt says
+
+Naming only the pattern asks the approver to judge whether it "could
+match a secret", which the prompt gives them no way to answer — and a
+gate whose only stable replies are always-yes and always-no is one whose
+reader has stopped reading it.
+
+So the prompt names the files where it honestly can. An **absolute**
+pattern has no working-directory dependence, so it is expanded when the
+prompt is written and up to six matching filenames go into the message:
+`cat /etc/ssl/private/*` asks with *it matches 3 file(s): server.key
+ca.key dhparam.pem*. A **relative** one is still not expanded, and says
+so rather than implying the guard knows more than it does.
+
+Expansion happens only on the ask path, so an ordinary command pays
+nothing for it, and it carries **filenames only** — putting contents in
+the prompt would hand over exactly what the prompt exists to withhold.
+
+### Why a negated find predicate is exempt
+
+`find . -name x.md -not -path '*/.git/*' | head -2` used to ask about
+`*/.git/*`, whose basename is a bare wildcard. That token is an
+*exclusion*: a negated predicate can only shrink the set of files the
+command touches, so it is never something the command reads, and the
+reader that armed the gate (`head`) is reading `find`'s stdout rather
+than a path. Every `find … -not -path` pipeline containing a reader
+prompted, which is most of them.
+
+The exemption is the narrowest shape that covers it — `-not` or `!`,
+then a `-path`/`-name`/`-wholename`/`-regex` predicate, then the token —
+and it is live only inside a window where find's own grammar governs. A
+`find` **token** arms that window and the next reader token closes it,
+so `cat -not -path .env` asks, and so does
+`find . -type d | head -2; cat -not -path .env`, where the `find`
+belongs to a different command on the same line. Arming on a text match
+over the whole command instead was tried first and was a fail-open in
+both of those, and in `echo "use find for this"; cat -not -path .env`,
+where the word never named a command at all. A reader *before* find does
+not close the window, since `head -2 <(find . -not -path '*/.git/*')`
+still has find governing its own arguments.
+
+Nothing positive is exempted, because a positive predicate can *widen*
+what a later `-exec` reads: `find . -name '*.pem'` still asks, and so
+does `grep --include='*.pem'`.
+
+Two conditions past the shape itself close the ways the shape alone
+lies. A **second negation** makes the predicate positive again, so it
+selects the files it names rather than excluding them —
+`find . ! ! -name '*.pem' -exec cat {} +` reads every key it matches,
+and is not exempt; a third negation fails closed with the rest rather
+than being counted. And the operand must carry a **wildcard**, because a
+negated predicate naming a literal path is indistinguishable here from a
+filename: that is what let a `find`-shaped *argument* to a reader —
+`less bin/find -not -path .env` — lend find's grammar to a secret. The
+exemption can therefore only ever skip a token containing `*` or `?`,
+which is what the reported false positive always was.
 
 ## Why one Bash authority script, not several parallel hooks
 
