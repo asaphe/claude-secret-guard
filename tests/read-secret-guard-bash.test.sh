@@ -146,6 +146,57 @@ check_from_globdir() {
 check_from_globdir ASK    "positive control from the glob cwd" "cat $PEM"
 check_from_globdir SILENT "harmless glob beside a real pem"    "cat *.log"
 
+# --- a negated find predicate is a pattern that excludes, never a file that is read -------------
+run SILENT "not -path exclusion glob"          "find . -name x.md -not -path '*/.git/*' | head -2"
+run SILENT "bang -path exclusion glob"         "find . -name x.md ! -path '*/.git/*' | head -2"
+run SILENT "not -path excluding dotenv"        "find . ! -path '*/.env*' -type f | head -2"
+run SILENT "not -name excluding a key"         "find . -not -name '*.pem' -type f | head -2"
+# The exemption is the negated shape only: a POSITIVE predicate can widen what a later -exec reads.
+run ASK    "positive -name naming a key"       "find . -name '*.pem' | head -2"
+run ASK    "positive -path under .ssh"         "find . -path '*/.ssh/*' | head -2"
+# The window is armed by a find TOKEN and closed by the next reader, so a find elsewhere on the line cannot lend its grammar to another command.
+run ASK    "not -path without find at all"     "cat -not -path .env"
+run ASK    "find in an earlier pipeline"       "find . -type d | head -2; cat -not -path .env"
+run ASK    "find only inside a quoted string"  'echo "use find for this"; cat -not -path .env'
+run ASK    "find as a variable value"          "X=find; cat -not -path .env"
+run ASK    "reader between find and the token" "find . -type d | head -2; grep -r x -not -path $KEY"
+# A reader BEFORE find does not close the window: process substitution puts the reader first and find still governs its own arguments.
+run SILENT "reader before find on the line"    "head -2 <(find . -not -path '*/.git/*')"
+# The second find of a two-command line arrives as F=\$find once the tokenizer strips the substitution punctuation, and still arms the window.
+run SILENT "find reached through a substitution" "find . -name x.md -not -path '*/.git/*' | head -2
+F=\$(find . -name x.md -not -path '*/.git/*' | head -1)
+[ -n \"\$F\" ] && sed -n '1,70p' \"\$F\""
+# An exclusion glob does not lend its silence to a real read on the same line.
+run ASK    "exclusion glob beside a key read"  "find . -not -path '*/.git/*' | head -2; cat $PEM"
+
+# --- an unresolved glob prompt names what the approver is being asked about ----------------------
+reason() {  # reason <command-text> -> permissionDecisionReason, or empty
+  printf '%s' "$(jq -nc --arg c "$1" '{tool_input:{command:$c}}')" | bash "$GUARD" 2>/dev/null \
+    | jq -r '.hookSpecificOutput.permissionDecisionReason // empty'
+}
+says() {
+  local label="$1" cmd="$2" needle="$3" got
+  got=$(reason "$cmd")
+  case "$got" in
+    *"$needle"*) printf 'ok   %s\n' "$label"; pass=$((pass + 1)) ;;
+    *) printf 'FAIL %s — reason %q did not contain %q\n' "$label" "$got" "$needle"; fail=$((fail + 1)) ;;
+  esac
+}
+
+# GLOBDIR is absolute and already holds one pem, so its expansion here is the one the command would get.
+: > "$GLOBDIR/id_rsa"
+says "absolute glob names its matches"   "cat $GLOBDIR/*"          "it matches 2 file(s)"
+says "absolute glob names the filenames" "cat $GLOBDIR/*"          "$PEM"
+says "absolute glob matching nothing"    "cat $GLOBDIR/nonesuch/*" "matches nothing under that path right now"
+# A relative pattern says why it cannot be expanded rather than implying the guard knows more than it does.
+says "relative glob is not expanded"     'cat *'                   "working directory is not the command's"
+# Naming a match must never mean reading one: the prompt carries filenames, never contents. A plain sentinel rather than a secret-shaped literal — this asserts that contents do not travel, which no particular shape makes truer.
+printf 'CONTENTS-MUST-NOT-TRAVEL\n' > "$GLOBDIR/$KEY"
+case "$(reason "cat $GLOBDIR/*")" in
+  *CONTENTS-MUST-NOT-TRAVEL*) printf 'FAIL prompt leaked file contents\n'; fail=$((fail + 1)) ;;
+  *) printf 'ok   prompt carries names, not contents\n'; pass=$((pass + 1)) ;;
+esac
+
 # --- the authority must carry this guard's exit code, not just its stdout ---
 # Only stdout was read, so the reader's own fail-closed branch reached the caller as a plain allow. Stubbed rather than provoked, because every earlier stage refuses the same unreadable payload first and would exit before this one runs.
 AUTH_DIR=$(mktemp -d "${TMPDIR:-/tmp}/auth-wiring.XXXXXX") || { printf 'FATAL: mktemp failed\n'; exit 1; }
