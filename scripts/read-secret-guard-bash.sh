@@ -73,11 +73,16 @@ RE_READER_TOK='^(.*/)?(cat|head|tail|less|more|grep)$'
 FIND_ACTIVE=""
 PREV=""
 PREV2=""
+PREV3=""
 
 while IFS= read -r -d '' token; do
-  # A NEGATED find predicate names a pattern that can only SHRINK the set of files touched, so it is never a read target.
-  if [ -n "$FIND_ACTIVE" ] && [[ $PREV =~ ^-(i?path|i?name|i?wholename|i?regex)$ ]] && { [ "$PREV2" = "-not" ] || [ "$PREV2" = "!" ]; }; then
-    PREV2=$PREV; PREV=$token
+  # A SINGLY negated find predicate whose operand is a WILDCARD can only SHRINK the set of files touched, so it is never a read target; a second negation makes it positive again and a literal operand is indistinguishable from a filename — see README § Why a negated find predicate is exempt.
+  if [ -n "$FIND_ACTIVE" ] \
+     && [[ $PREV =~ ^-(i?path|i?name|i?wholename|i?regex)$ ]] \
+     && { [ "$PREV2" = "-not" ] || [ "$PREV2" = "!" ]; } \
+     && [ "$PREV3" != "-not" ] && [ "$PREV3" != "!" ] \
+     && [[ $token == *[*?]* ]]; then
+    PREV3=$PREV2; PREV2=$PREV; PREV=$token
     continue
   fi
   if [[ $token =~ $RE_FIND_TOK ]]; then
@@ -85,7 +90,7 @@ while IFS= read -r -d '' token; do
   elif [[ $token =~ $RE_READER_TOK ]]; then
     FIND_ACTIVE=""
   fi
-  PREV2=$PREV; PREV=$token
+  PREV3=$PREV2; PREV2=$PREV; PREV=$token
   BASENAME=$(basename -- "$token" 2>/dev/null)
   # A glob is not expanded here, so judge the pattern by what it could match rather than by the cwd.
   if printf '%s' "$token" | grep -qE '[*?]' && { printf '%s' "$BASENAME" | grep -qE '^\.env|^[*?]+$' || printf '%s' "$token" | grep -qE '(^|/)\.ssh/'; }; then

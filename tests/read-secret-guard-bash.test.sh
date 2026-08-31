@@ -168,6 +168,17 @@ F=\$(find . -name x.md -not -path '*/.git/*' | head -1)
 [ -n \"\$F\" ] && sed -n '1,70p' \"\$F\""
 # An exclusion glob does not lend its silence to a real read on the same line.
 run ASK    "exclusion glob beside a key read"  "find . -not -path '*/.git/*' | head -2; cat $PEM"
+# A second negation makes the predicate positive, so it SELECTS the files it names — the -exec form reads every one.
+run ASK    "double-negated -not is positive"   "find . -not -not -path .env | head -2"
+run ASK    "double-negated bang is positive"   "find . ! ! -path .env | head -2"
+run ASK    "double-negated key pattern"        "find . ! ! -name '*.pem' -exec cat {} +"
+# A negated predicate naming a LITERAL path is indistinguishable here from a filename, so only a wildcard operand is exempt.
+run ASK    "negated literal dotenv"            "find . -not -path .env | head -2"
+run ASK    "negated literal key"               "find . -not -name $PEM | head -2"
+# The shapes where a find-token ARGUMENT to a reader lends find's grammar to a secret filename.
+run ASK    "find-shaped argument to less"      "less bin/find -not -path .env"
+run ASK    "find-shaped argument to cat"       "cat ./find -not -path id_rsa"
+run ASK    "find-shaped argument to head"      "head bin/find -not -path $KEY"
 
 # --- an unresolved glob prompt names what the approver is being asked about ----------------------
 reason() {  # reason <command-text> -> permissionDecisionReason, or empty

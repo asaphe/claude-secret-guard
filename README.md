@@ -200,6 +200,18 @@ Nothing positive is exempted, because a positive predicate can *widen*
 what a later `-exec` reads: `find . -name '*.pem'` still asks, and so
 does `grep --include='*.pem'`.
 
+Two conditions past the shape itself close the ways the shape alone
+lies. A **second negation** makes the predicate positive again, so it
+selects the files it names rather than excluding them —
+`find . ! ! -name '*.pem' -exec cat {} +` reads every key it matches,
+and is not exempt; a third negation fails closed with the rest rather
+than being counted. And the operand must carry a **wildcard**, because a
+negated predicate naming a literal path is indistinguishable here from a
+filename: that is what let a `find`-shaped *argument* to a reader —
+`less bin/find -not -path .env` — lend find's grammar to a secret. The
+exemption can therefore only ever skip a token containing `*` or `?`,
+which is what the reported false positive always was.
+
 ## Why one Bash authority script, not several parallel hooks
 
 `hooks/hooks.json` registers a single script (`bash-secret-authority.sh`)
