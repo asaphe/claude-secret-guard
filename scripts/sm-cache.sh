@@ -46,11 +46,12 @@ fi
 
 PROFILE_ARGS=()
 [ -n "$PROFILE" ] && PROFILE_ARGS=(--profile "$PROFILE")
-VALUE=$(aws secretsmanager get-secret-value "${PROFILE_ARGS[@]}" --secret-id "$SECRET_ID" --query SecretString --output text 2>&1)
-RC=$?
-if [ "$RC" -ne 0 ] || [ -z "$VALUE" ]; then
-  echo "$VALUE" >&2
-  exit "$RC"
+VALUE=$(aws secretsmanager get-secret-value "${PROFILE_ARGS[@]}" --secret-id "$SECRET_ID" --query SecretString --output text 2>&1) \
+  || { RC=$?; echo "$VALUE" >&2; exit "$RC"; }
+# A success-but-empty read must not exit 0: callers branch on our status, not on the cache file.
+if [ -z "$VALUE" ]; then
+  echo "sm-cache.sh: $SECRET_ID resolved to an empty value — not cached" >&2
+  exit 1
 fi
 
 umask 077

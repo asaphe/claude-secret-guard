@@ -57,13 +57,14 @@ if [ "$REFRESH" -eq 0 ] && [ -s "$CACHE_FILE" ]; then
 fi
 
 if [ -n "$ACCOUNT" ]; then
-  VALUE=$(op read --account "$ACCOUNT" "$URI")
+  VALUE=$(op read --account "$ACCOUNT" "$URI") || exit $?
 else
-  VALUE=$(op read "$URI")
+  VALUE=$(op read "$URI") || exit $?
 fi
-RC=$?
-if [ "$RC" -ne 0 ] || [ -z "$VALUE" ]; then
-  exit "$RC"
+# A success-but-empty read must not exit 0: callers branch on our status, not on the cache file.
+if [ -z "$VALUE" ]; then
+  echo "op-cache.sh: $URI resolved to an empty value — not cached" >&2
+  exit 1
 fi
 
 umask 077
