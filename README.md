@@ -268,6 +268,17 @@ secret rotated mid-session. `scripts/aws-batch-secrets.sh` is the same
 idea for `batch-get-secret-value` (defaults to a masked name+byte-length
 summary; `--values --reveal` opts into full values).
 
+`aws-batch-secrets.sh` reports what it fetched, not what it listed: its
+trailer reads `Fetched N of M secrets`, and any shortfall — a batch the
+CLI refused, an unparseable response, or per-secret `Errors[]` inside an
+otherwise successful call — marks the run `INCOMPLETE` and exits non-zero
+(the AWS CLI's own status where there was one, `1` otherwise). Partial
+results are still printed, so a caller that branches on the exit code
+never mistakes a truncated audit for a complete one — but branch on `$?`
+(or `${PIPESTATUS[0]}`), never on the length of the output: a run that
+fetched 5 of 25 still emits a well-formed 5-element result, and piping it
+into `jq` replaces the script's status with `jq`'s.
+
 `scripts/op-cache-cleanup.sh` is a `Stop` hook that purges both cache
 directories when the session ends, so values don't sit in `/tmp`
 indefinitely.

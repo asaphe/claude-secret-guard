@@ -30,7 +30,8 @@ extract_or_block() {
 case "$TOOL" in
   Write)     extract_or_block '.tool_input.content // empty' ;;
   Edit)      extract_or_block '.tool_input.new_string // empty' ;;
-  MultiEdit) extract_or_block '[.tool_input.edits[]?.new_string // empty] | join("\n") + "\n" + join("")' ;;
+  # No `edits[]?` here: the optional iterator turns a malformed edits payload into an empty CONTENT, which the emptiness check below reads as "nothing to inspect" and lets through.
+  MultiEdit) extract_or_block '[.tool_input.edits[].new_string // empty] | join("\n") + "\n" + join("")' ;;
   NotebookEdit) extract_or_block '.tool_input.new_source // empty' ;;
 esac
 

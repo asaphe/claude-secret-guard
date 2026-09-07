@@ -30,18 +30,18 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+# Expanded below as ${a[@]+…}: on bash 3.2 (macOS system bash) an empty array under set -u aborts the script before any AWS call.
 PROFILE_ARGS=()
 [ -n "$PROFILE" ] && PROFILE_ARGS=(--profile "$PROFILE")
 
 # No --max-items: it caps the result and hands back a NextToken this script never read, so an account over the cap was silently truncated.
-LIST_CMD=(aws secretsmanager list-secrets "${PROFILE_ARGS[@]}")
+LIST_CMD=(aws secretsmanager list-secrets ${PROFILE_ARGS[@]+"${PROFILE_ARGS[@]}"})
 if [ -n "$FILTER" ]; then
   LIST_CMD+=(--filters "Key=name,Values=$FILTER")
 fi
 
-# `|| {…}` rather than `if !`: it suppresses errexit the same way while leaving $? as the CLI's own status, which callers branch on.
-SECRETS_JSON=$("${LIST_CMD[@]}" 2>&1) \
-  || { RC=$?; printf '%s\n' "$SECRETS_JSON" >&2; exit "$RC"; }
+# Streams stay separate: merged into stdout, a benign CLI notice on a *successful* call becomes part of the JSON and breaks every parse below.
+SECRETS_JSON=$("${LIST_CMD[@]}") || exit $?
 SECRET_ARNS=$(printf '%s\n' "$SECRETS_JSON" | jq -r '.SecretList[].ARN // empty')
 
 if [ -z "$SECRET_ARNS" ]; then
@@ -60,43 +60,62 @@ fi
 ALL_RESULTS="[]"
 BATCH=()
 BATCH_NUM=0
+FETCHED=0
+FAILED_RC=0
+
+# Assigns globals rather than echoing: run in a command substitution, the counters it maintains would die with the subshell.
+fetch_batch() {  # fetch_batch <arn...>
+  local rc=0 result batch_results count errors
+  BATCH_NUM=$((BATCH_NUM + 1))
+  echo "Fetching batch $BATCH_NUM ($# secrets)..." >&2
+
+  # One shell argument per ARN: a single newline-joined string reaches the CLI as one malformed secret id.
+  result=$(aws secretsmanager batch-get-secret-value \
+    ${PROFILE_ARGS[@]+"${PROFILE_ARGS[@]}"} \
+    --secret-id-list "$@") || rc=$?
+
+  if [ "$rc" -ne 0 ]; then
+    FAILED_RC=$rc
+    echo "aws-batch-secrets: batch $BATCH_NUM failed (aws exit $rc); its $# secrets are absent from the output below." >&2
+    return 0
+  fi
+
+  # A parse failure now means genuinely malformed JSON rather than stderr noise, and it still must not read as an empty batch.
+  if ! batch_results=$(printf '%s\n' "$result" | jq '.SecretValues // []' 2>/dev/null); then
+    [ "$FAILED_RC" -ne 0 ] || FAILED_RC=1
+    echo "aws-batch-secrets: batch $BATCH_NUM returned no parseable result; raw output withheld because a partially-fetched response carries SecretString values." >&2
+    return 0
+  fi
+
+  # AWS reports per-secret failures inside a successful call, so a 200 does not mean the batch was fully fetched.
+  errors=$(printf '%s\n' "$result" | jq -r '.Errors // [] | .[] | [.SecretId, .ErrorCode] | @tsv')
+  if [ -n "$errors" ]; then
+    [ "$FAILED_RC" -ne 0 ] || FAILED_RC=1
+    printf 'aws-batch-secrets: batch %s could not fetch:\n%s\n' "$BATCH_NUM" "$errors" >&2
+  fi
+
+  # Checked before counting: jq 'length' reports 10 for a 10-character string, and the `add` below would otherwise abort with the response fragment quoted in its error.
+  if ! printf '%s\n' "$batch_results" | jq -e 'type == "array"' >/dev/null 2>&1; then
+    [ "$FAILED_RC" -ne 0 ] || FAILED_RC=1
+    echo "aws-batch-secrets: batch $BATCH_NUM returned a SecretValues that is not a list; raw output withheld because it carries response content." >&2
+    return 0
+  fi
+
+  count=$(printf '%s\n' "$batch_results" | jq 'length')
+  FETCHED=$((FETCHED + count))
+  ALL_RESULTS=$(printf '%s %s\n' "$ALL_RESULTS" "$batch_results" | jq -s 'add')
+}
 
 while IFS= read -r arn; do
   BATCH+=("$arn")
   if [ ${#BATCH[@]} -ge $BATCH_SIZE ]; then
-    BATCH_NUM=$((BATCH_NUM + 1))
-    echo "Fetching batch $BATCH_NUM (${#BATCH[@]} secrets)..." >&2
-
-    # One shell argument per ARN: a single newline-joined string reaches the CLI as one malformed secret id.
-    RESULT=$(aws secretsmanager batch-get-secret-value \
-      "${PROFILE_ARGS[@]}" \
-      --secret-id-list "${BATCH[@]}" \
-      2>&1) || true
-
-    # jq exits non-zero on the plain-text AWS error that || true just let through, which under set -e would abandon the remaining batches silently.
-    BATCH_RESULTS=$(printf '%s\n' "$RESULT" | jq '.SecretValues // []' 2>/dev/null) || {
-      echo "aws-batch-secrets: batch $BATCH_NUM returned no parseable result; raw output withheld because a partially-fetched response carries SecretString values." >&2
-      BATCH_RESULTS='[]'
-    }
-    ALL_RESULTS=$(printf '%s %s\n' "$ALL_RESULTS" "$BATCH_RESULTS" | jq -s 'add')
+    fetch_batch "${BATCH[@]}"
     BATCH=()
   fi
 done <<< "$SECRET_ARNS"
 
 if [ ${#BATCH[@]} -gt 0 ]; then
-  BATCH_NUM=$((BATCH_NUM + 1))
-  echo "Fetching batch $BATCH_NUM (${#BATCH[@]} secrets)..." >&2
-
-  RESULT=$(aws secretsmanager batch-get-secret-value \
-    "${PROFILE_ARGS[@]}" \
-    --secret-id-list "${BATCH[@]}" \
-    2>&1) || true
-
-  BATCH_RESULTS=$(printf '%s\n' "$RESULT" | jq '.SecretValues // []' 2>/dev/null) || {
-    echo "aws-batch-secrets: batch $BATCH_NUM returned no parseable result; raw output withheld because a partially-fetched response carries SecretString values." >&2
-    BATCH_RESULTS='[]'
-  }
-  ALL_RESULTS=$(printf '%s %s\n' "$ALL_RESULTS" "$BATCH_RESULTS" | jq -s 'add')
+  fetch_batch "${BATCH[@]}"
 fi
 
 if [ "$REVEAL" = false ]; then
@@ -112,4 +131,11 @@ else
   printf '%s\n' "$ALL_RESULTS" | jq -r '.[] | [.Name, (.SecretString // "(binary)")] | @tsv'
 fi
 
-echo "Fetched $TOTAL secrets in $BATCH_NUM batch(es)" >&2
+# Reports what the run achieved, not what it listed: the old trailer asserted TOTAL after a swallowed batch and still exited 0.
+if [ "$FETCHED" -ne "$TOTAL" ] || [ "$FAILED_RC" -ne 0 ]; then
+  echo "Fetched $FETCHED of $TOTAL secrets in $BATCH_NUM batch(es) — INCOMPLETE" >&2
+  [ "$FAILED_RC" -eq 0 ] || exit "$FAILED_RC"
+  exit 1
+fi
+
+echo "Fetched $FETCHED of $TOTAL secrets in $BATCH_NUM batch(es)" >&2
