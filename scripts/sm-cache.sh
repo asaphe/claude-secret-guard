@@ -11,7 +11,15 @@ while [ $# -gt 0 ]; do
     --mask) MASK=1; shift ;;
     --reveal) MASK=0; shift ;;
     --refresh) REFRESH=1; shift ;;
-    --profile) PROFILE="$2"; shift 2 ;;
+    # Guarded like op-cache.sh's --account: an unguarded "$2" under set -u aborts with a raw "unbound variable" instead of a usable message.
+    --profile)
+      PROFILE="${2:-}"
+      if [ -z "$PROFILE" ]; then
+        echo "sm-cache.sh: --profile requires a value" >&2
+        exit 64
+      fi
+      shift 2
+      ;;
     *) break ;;
   esac
 done
@@ -24,7 +32,8 @@ fi
 
 SESSION_ID="${CLAUDE_CODE_SESSION_ID:-pid-${PPID}}"
 CACHE_DIR="/tmp/sm-cache-${SESSION_ID}"
-mkdir -p "$CACHE_DIR"
+# Created private rather than widened afterwards: between mkdir and chmod the directory sat at the process umask, readable by any local user.
+(umask 077; mkdir -p "$CACHE_DIR")
 chmod 700 "$CACHE_DIR"
 
 KEY=$(printf '%s|%s' "$PROFILE" "$SECRET_ID" | shasum -a 256 | awk '{print $1}')
@@ -46,11 +55,11 @@ fi
 
 PROFILE_ARGS=()
 [ -n "$PROFILE" ] && PROFILE_ARGS=(--profile "$PROFILE")
+# `|| {…}` rather than `if !`: it suppresses errexit the same way while leaving $? as the CLI's own status, which callers branch on.
 VALUE=$(aws secretsmanager get-secret-value "${PROFILE_ARGS[@]}" --secret-id "$SECRET_ID" --query SecretString --output text 2>&1) \
-  || { RC=$?; echo "$VALUE" >&2; exit "$RC"; }
-# A success-but-empty read must not exit 0: callers branch on our status, not on the cache file.
+  || { RC=$?; printf '%s\n' "$VALUE" >&2; exit "$RC"; }
 if [ -z "$VALUE" ]; then
-  echo "sm-cache.sh: $SECRET_ID resolved to an empty value — not cached" >&2
+  echo "sm-cache: empty value returned for $SECRET_ID" >&2
   exit 1
 fi
 

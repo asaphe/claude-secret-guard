@@ -12,19 +12,20 @@ if [ -z "$INPUT" ] || ! printf '%s' "$INPUT" | jq -e 'type == "object"' >/dev/nu
   echo "PASTE-SECRET GUARD: cannot read the hook payload — it is empty, not a JSON object, or jq is missing. Blocking: the guard cannot confirm this prompt is free of secret-shaped literals." >&2
   exit 2
 fi
-# Blocks rather than allows: jq failing here yields an empty prompt, which the check below reads as "nothing to inspect".
+# Blocks rather than allows: an unparseable payload cannot be shown to be safe, and jq failing here would otherwise exit 0 on every prompt and disarm the guard silently.
 if ! PROMPT=$(printf '%s' "$INPUT" | jq -r '.prompt // empty' 2>/dev/null); then
-  echo "PASTE-SECRET GUARD: cannot read the hook payload — jq is missing or the JSON did not parse. Blocking: the guard cannot confirm this prompt is free of secret-shaped literals." >&2
+  echo "PASTE-SECRET GUARD: cannot read the hook payload — jq is missing or the JSON did not parse. Blocking: the guard cannot confirm this prompt is free of secret-shaped literals. Install jq, or disable the secret-guard plugin deliberately." >&2
   exit 2
 fi
 [ -z "$PROMPT" ] && exit 0
 
-if printf '%s' "$PROMPT" | grep -qE -- "$SECRET_PATTERN"; then
+if printf '%s\n' "$PROMPT" | grep -qE -- "$SECRET_PATTERN"; then
+  # Notice goes to stderr: on exit 0 this hook's stdout is appended to the model's context.
   if fixture_exempt "$PROMPT"; then
     echo "PASTE-SECRET GUARD: allowed — every matched literal is a sanctioned fixture in fixtures.allow: $SECRET_GUARD_EXEMPTED" >&2
     exit 0
   fi
-  jq -n '{decision: "block", reason: "PASTE-SECRET GUARD: this prompt looks like it contains a raw secret (AWS key / Slack bot token / GitLab PAT / private key). Blocked before it enters history/paste-cache. Use a masked wrapper (see README) if this needs to reach a command, or resend without the literal value."}'
+  jq -n '{decision: "block", reason: "PASTE-SECRET GUARD: this prompt looks like it contains a raw secret (AWS key / Slack bot token / GitLab PAT / private key). Blocked before it enters history/paste-cache. Use a masked wrapper (see README) if this needs to reach a command, or resend without the literal value. If it is a sanctioned test fixture, its exact value belongs in the plugin fixtures.allow; otherwise reference the value rather than pasting it."}'
   exit 0
 fi
 

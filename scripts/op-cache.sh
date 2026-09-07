@@ -36,7 +36,8 @@ fi
 
 SESSION_ID="${CLAUDE_CODE_SESSION_ID:-pid-${PPID}}"
 CACHE_DIR="/tmp/op-cache-${SESSION_ID}"
-mkdir -p "$CACHE_DIR"
+# Created private rather than widened afterwards: between mkdir and chmod the directory sat at the process umask, readable by any local user.
+(umask 077; mkdir -p "$CACHE_DIR")
 chmod 700 "$CACHE_DIR"
 
 KEY=$(printf '%s\n%s' "$ACCOUNT" "$URI" | shasum -a 256 | awk '{print $1}')
@@ -57,13 +58,13 @@ if [ "$REFRESH" -eq 0 ] && [ -s "$CACHE_FILE" ]; then
 fi
 
 if [ -n "$ACCOUNT" ]; then
-  VALUE=$(op read --account "$ACCOUNT" "$URI") || exit $?
+  VALUE=$(op read --account "$ACCOUNT" "$URI")
 else
-  VALUE=$(op read "$URI") || exit $?
+  VALUE=$(op read "$URI")
 fi
-# A success-but-empty read must not exit 0: callers branch on our status, not on the cache file.
+# set -e already exits above on a failed read, with op's own stderr intact; this catches success-but-empty, which used to exit 0 without caching or emitting.
 if [ -z "$VALUE" ]; then
-  echo "op-cache.sh: $URI resolved to an empty value — not cached" >&2
+  echo "op-cache: empty value returned for $URI" >&2
   exit 1
 fi
 

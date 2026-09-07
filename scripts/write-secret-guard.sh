@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# PreToolUse hook (Write|Edit|MultiEdit). Content-scans the new text for the same near-zero-FP shapes as the prompt guard, before it lands in a file.
+# PreToolUse hook (Write|Edit|MultiEdit|NotebookEdit). Content-scans the new text for the same near-zero-FP shapes as the prompt guard, before it lands in a file.
 
 # shellcheck source-path=SCRIPTDIR
 source "$(dirname "${BASH_SOURCE[0]}")/secret-shapes.sh"
@@ -12,9 +12,9 @@ if [ -z "$INPUT" ] || ! printf '%s' "$INPUT" | jq -e 'type == "object"' >/dev/nu
   echo "WRITE-SECRET GUARD: cannot read the hook payload — it is empty, not a JSON object, or jq is missing. Blocking: the guard cannot confirm this call is free of secret-shaped literals." >&2
   exit 2
 fi
-# Blocks rather than allows: jq failing here yields empty content, which the check below reads as "nothing to inspect".
+# Blocks rather than allows: an unparseable payload cannot be shown to be safe, and jq failing here would otherwise exit 0 on every call and disarm the guard silently.
 if ! TOOL=$(printf '%s' "$INPUT" | jq -r '.tool_name // empty' 2>/dev/null); then
-  echo "WRITE-SECRET GUARD: cannot read the hook payload — jq is missing or the JSON did not parse. Blocking: the guard cannot confirm this call is free of secret-shaped literals." >&2
+  echo "WRITE-SECRET GUARD: cannot read the hook payload — jq is missing or the JSON did not parse. Blocking: the guard cannot confirm this call is free of secret-shaped literals. Install jq, or disable the secret-guard plugin deliberately." >&2
   exit 2
 fi
 
@@ -30,23 +30,19 @@ extract_or_block() {
 case "$TOOL" in
   Write)     extract_or_block '.tool_input.content // empty' ;;
   Edit)      extract_or_block '.tool_input.new_string // empty' ;;
-  MultiEdit) extract_or_block '[.tool_input.edits[] | .new_string // empty] | join("\n")' ;;
+  MultiEdit) extract_or_block '[.tool_input.edits[]?.new_string // empty] | join("\n") + "\n" + join("")' ;;
+  NotebookEdit) extract_or_block '.tool_input.new_source // empty' ;;
 esac
 
 [ -z "$CONTENT" ] && exit 0
 
-# A secret scanner's allowlist has to name the fixture literals it exempts, so these shapes are its legitimate content.
-FILE_PATH=$(printf '%s' "$INPUT" | jq -r '.tool_input.file_path // empty')
-case "${FILE_PATH##*/}" in
-  .gitleaks.toml|gitleaks.toml|.gitleaksignore|.secretsignore) exit 0 ;;
-esac
-
-if printf '%s' "$CONTENT" | grep -qE -- "$SECRET_PATTERN"; then
+# No generator bail-out here: file content naming the generator never means the generator produced it. See README § The generator.
+if printf '%s\n' "$CONTENT" | grep -qE -- "$SECRET_PATTERN"; then
   if fixture_exempt "$CONTENT"; then
     echo "WRITE-SECRET GUARD: allowed — every matched literal is a sanctioned fixture in fixtures.allow: $SECRET_GUARD_EXEMPTED" >&2
     exit 0
   fi
-  echo "WRITE-SECRET GUARD: this $TOOL call would write a raw secret-shaped literal (private key / AWS access key / Slack bot token / GitLab PAT) into a file. Use a reference (env var, masked-cache path) instead of the literal value — never hardcode it into code." >&2
+  echo "WRITE-SECRET GUARD: this $TOOL call would write a raw secret-shaped literal (private key / AWS access key / Slack bot token / GitLab PAT) into a file. Use a reference (env var, masked-cache path) instead of the literal value — never hardcode it into code. If it is a test fixture, add its exact value to the plugin's fixtures.allow — generating one with scripts/fixture-value.sh does not exempt it on this surface, the value still has to be listed. Do not assemble it from fragments to get past this guard." >&2
   exit 2
 fi
 

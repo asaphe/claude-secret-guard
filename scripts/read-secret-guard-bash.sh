@@ -7,26 +7,28 @@ if [ -z "$INPUT" ] || ! printf '%s' "$INPUT" | jq -e 'type == "object"' >/dev/nu
   echo "READ-SECRET GUARD: cannot read the hook payload — it is empty, not a JSON object, or jq is missing. Blocking: the guard cannot confirm this command is safe." >&2
   exit 2
 fi
-# Blocks rather than allows: jq failing here yields an empty command, which every check below reads as "nothing to inspect".
+# Blocks rather than allows: jq failing here yields an empty value that every check below reads as "nothing to inspect", silently disarming the guard.
 if ! CMD=$(printf '%s' "$INPUT" | jq -r '.tool_input.command // empty' 2>/dev/null); then
   echo "READ-SECRET GUARD: cannot read the hook payload — jq is missing or the JSON did not parse. Blocking: the guard cannot confirm this command is safe." >&2
   exit 2
 fi
 [ -z "$CMD" ] && exit 0
 
-# shellcheck source=scripts/strip-cmd.sh
+# shellcheck source-path=SCRIPTDIR
 source "$(dirname "${BASH_SOURCE[0]}")/strip-cmd.sh"
+# Stripped twice: fully-masked text decides whether this is a read, while -m stays intact for the scan, where its value is a filename rather than prose — see README § Flag masking and filenames.
 GATE_CMD=$(strip_cmd "$CMD")
-SCAN_CMD=$(strip_cmd "$CMD" long-flags-only)
 
-# Normalized like the mask guard's verbs, or a quoted reader name (`"cat" secrets.pem`) splits into its own segment with no trailing space and matches nothing.
-GATE_CMD=$(normalize_cmd "$GATE_CMD")
-
-# A reader is a reader wherever it sits, so separators and wrappers must not anchor it away.
+# Matched anywhere inside a segment rather than after a fixed wrapper list, which would go silent on any prefix the list omits (timeout, nice, stdbuf, ionice, doas).
 SEP=$';&|()`"\''
-# Matched anywhere inside a segment rather than after a fixed wrapper list, which went silent on any prefix the list omitted (timeout, nice, stdbuf, ionice, doas). A leading / admits the same reader named by path, and grep carries no recursive-flag condition: -r decides how many files are read, never whether the one named is a key.
+# Normalized like the mask guard's predicates, or a quoted reader name (`"cat" secrets.pem`) splits into its own segment with no trailing space and matches nothing.
+GATE_CMD=$(normalize_cmd "$GATE_CMD")
+# A leading slash admits the same reader named by path, and grep carries no recursive-flag condition: -r decides how many files are read, never whether the one named is a key — see README § Why grep is gated unconditionally.
 printf '%s' "$GATE_CMD" | tr "$SEP" '\n' | grep -qE '(^|[[:space:]]|/)(cat|head|tail|less|more|grep)([[:space:]<]|$)' \
   || exit 0
+
+# Computed after the gate, not before: a non-read command is the common case and must not pay a second perl.
+SCAN_CMD=$(strip_cmd "$CMD" long-flags-only)
 
 ask() {
   jq -n --arg reason "$1" \
@@ -57,8 +59,8 @@ tokenize() {
     use Text::ParseWords qw(shellwords);
     my $cmd = do { local $/; <STDIN> };
     my @w = shellwords($cmd);
-    # $'…' and substitution syntax survive tokenizing as punctuation glued to the filename.
-    @w = map { my $t = $_; $t =~ s/^\$//; $t =~ s/[()`]//g; $t } @w;
+    # Punctuation survives tokenizing glued to the filename — $'"'"'…'"'"', substitution syntax, and a trailing ; or & each defeat the end-anchored suffix patterns.
+    @w = map { my $t = $_; $t =~ s/^\$//; $t =~ s/[()`]//g; $t =~ s/[;&]+$//; $t } @w;
     # A redirect glues its target to the reader, and the basename patterns are anchored: cat<.env is one token that matches nothing.
     @w = grep { length } map { split /[<>]+/, $_ } @w;
     # Unbalanced quotes yield nothing; fall back to a bare split so the guard still asks rather than going silent.
@@ -67,7 +69,27 @@ tokenize() {
   '
 }
 
-# The exemption below is armed by a `find` TOKEN and disarmed by the next reader token, so it is live only inside the window where find's own grammar governs — see README § Why a negated find predicate is exempt.
+# Fails closed like the jq check above: with nowhere to tokenize into, no argument was ever inspected.
+TOKENS_FILE=$(mktemp) || ask "READ-SECRET GUARD: could not create the temporary file this gate tokenizes into, so the arguments of this read were never inspected — confirm before its contents enter context/transcript."
+trap 'rm -f "$TOKENS_FILE"' EXIT
+tokenize "$SCAN_CMD" >"$TOKENS_FILE" 2>/dev/null
+# A missing perl empties this, which would make every read silent — fall back to a bare split so the gate still asks.
+if [ ! -s "$TOKENS_FILE" ]; then
+  # The trailing newline is load-bearing: without it the final token has no NUL and `read -d ''` discards it at EOF.
+  { printf '%s' "$SCAN_CMD" | tr -d '"'"'"'' | tr -s ' \t\n<>' '\n'; printf '\n'; } | tr '\n' '\0' >"$TOKENS_FILE"
+fi
+
+# Matched with bash's own regex engine rather than a grep per test: this loop runs before every Bash call, and the forks it used to spend cost more than the scan it performs.
+shopt -s nocasematch
+RE_GLOB='[*?]'
+RE_GLOB_SECRET='^\.env|^[*?]+$'
+RE_SSH_GLOB='(^|/)\.ssh/'
+RE_ENV='^-*\.env(\..+)?$'
+RE_ENV_SAMPLE='^-*\.env\.(example|sample|template)$'
+RE_KEY_NAME='\.(pem|key|p12|pfx)$|^-*id_(rsa|ed25519|ecdsa|dsa)$|^-*kubeconfig$'
+RE_KEY_PATH='\.kube/config$|(^|/)\.ssh(/|$)'
+
+# The exemption below is armed by a `find` TOKEN and disarmed by the next reader token, so it covers only the window in which find's own grammar governs — see README § Why a negated find predicate is exempt.
 RE_FIND_TOK='^([A-Za-z_][A-Za-z0-9_]*=)?\$?(.*/)?find$'
 RE_READER_TOK='^(.*/)?(cat|head|tail|less|more|grep)$'
 FIND_ACTIVE=""
@@ -91,20 +113,24 @@ while IFS= read -r -d '' token; do
     FIND_ACTIVE=""
   fi
   PREV3=$PREV2; PREV2=$PREV; PREV=$token
-  BASENAME=$(basename -- "$token" 2>/dev/null)
-  # A glob is not expanded here, so judge the pattern by what it could match rather than by the cwd.
-  if printf '%s' "$token" | grep -qE '[*?]' && { printf '%s' "$BASENAME" | grep -qE '^\.env|^[*?]+$' || printf '%s' "$token" | grep -qE '(^|/)\.ssh/'; }; then
+  # Every token is scanned, grep's pattern operand included: modelling grep's flag grammar to spare that one token cost four fail-opens — see README § Why the pattern operand is scanned.
+  case "$token" in
+    --*=*) token=${token#*=} ;;
+  esac
+  # Trailing slashes come off first, so a directory argument still yields the name basename would have given it.
+  BASENAME=${token%"${token##*[!/]}"}
+  BASENAME=${BASENAME##*/}
+  # A glob is not expanded here, so judge the pattern by what it could match rather than by the hook's cwd, which is not necessarily the command's.
+  if [[ $token =~ $RE_GLOB ]] && { [[ $BASENAME =~ $RE_GLOB_SECRET ]] || [[ $token =~ $RE_SSH_GLOB ]]; }; then
     ask "READ-SECRET GUARD: $token is an unresolved glob that could match a secret file — $(describe_glob "$token"). Confirm before its contents enter context/transcript."
   fi
-  if printf '%s' "$BASENAME" | grep -qE '^-*\.env(\..+)?$' && ! printf '%s' "$BASENAME" | grep -qE '^-*\.env\.(example|sample|template)$'; then
+  if [[ $BASENAME =~ $RE_ENV ]] && [[ ! $BASENAME =~ $RE_ENV_SAMPLE ]]; then
     ask "READ-SECRET GUARD: $BASENAME looks like a live env file — confirm before its contents enter context/transcript."
   fi
-  if printf '%s' "$BASENAME" | grep -qE '\.(pem|key|p12|pfx)$' \
-     || printf '%s' "$BASENAME" | grep -qE '^-*id_(rsa|ed25519|ecdsa|dsa)$' \
-     || printf '%s' "$BASENAME" | grep -qE '^-*kubeconfig$' \
-     || printf '%s' "$token" | grep -qE '\.kube/config$'; then
+  # Case-insensitive throughout: the matchers name files, and the filesystem this runs on is usually case-insensitive too.
+  if [[ $BASENAME =~ $RE_KEY_NAME ]] || [[ $token =~ $RE_KEY_PATH ]]; then
     ask "READ-SECRET GUARD: $BASENAME looks like a private key or kubeconfig — confirm before its contents enter context/transcript."
   fi
-done < <(tokenize "$SCAN_CMD")
+done <"$TOKENS_FILE"
 
 exit 0
