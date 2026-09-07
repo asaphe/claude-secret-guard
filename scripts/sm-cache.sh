@@ -55,9 +55,9 @@ fi
 
 PROFILE_ARGS=()
 [ -n "$PROFILE" ] && PROFILE_ARGS=(--profile "$PROFILE")
-# `|| {…}` rather than `if !`: it suppresses errexit the same way while leaving $? as the CLI's own status, which callers branch on.
-VALUE=$(aws secretsmanager get-secret-value "${PROFILE_ARGS[@]}" --secret-id "$SECRET_ID" --query SecretString --output text 2>&1) \
-  || { RC=$?; printf '%s\n' "$VALUE" >&2; exit "$RC"; }
+# Streams stay separate like op-cache.sh: merged in, a benign CLI notice on a *successful* call is cached as part of the secret; the ${a[@]+…} form keeps bash 3.2 from aborting on the empty array.
+VALUE=$(aws secretsmanager get-secret-value ${PROFILE_ARGS[@]+"${PROFILE_ARGS[@]}"} --secret-id "$SECRET_ID" --query SecretString --output text) \
+  || exit $?
 if [ -z "$VALUE" ]; then
   echo "sm-cache: empty value returned for $SECRET_ID" >&2
   exit 1
