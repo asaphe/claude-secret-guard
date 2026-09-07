@@ -27,50 +27,27 @@ extract_or_block() {
   fi
 }
 
-BOUNDARY=""
-# Assigned like CONTENT above, for the same subshell reason.
-extract_boundary() {
-  if ! BOUNDARY=$(printf '%s' "$INPUT" | jq -r "$1" 2>/dev/null); then
-    echo "WRITE-SECRET GUARD: cannot read the hook payload — jq is missing or the JSON did not parse. Blocking: the guard cannot confirm this call is free of secret-shaped literals." >&2
-    exit 2
-  fi
-}
-
 # Lowercased so a respelled name cannot fall off the end of the arms into an empty CONTENT, which the check below reads as "nothing to inspect".
 case "$(printf '%s' "$TOOL" | tr '[:upper:]' '[:lower:]')" in
   write)     extract_or_block '.tool_input.content // empty' ;;
   edit)      extract_or_block '.tool_input.new_string // empty' ;;
   # No `edits[]?` here: the optional iterator turns a malformed edits payload into an empty CONTENT, which the emptiness check below reads as "nothing to inspect" and lets through.
-  multiedit)
-    extract_or_block '[.tool_input.edits[].new_string // empty] | join("\n") + "\n" + join("")'
-    # join("") concatenates in array order, so an intervening edit keeps two fragments apart. Every ordered pair's facing ends are probed instead — see README § Split writes.
-    # shellcheck disable=SC2016  # a jq program, not a shell expansion
-    extract_boundary '[.tool_input.edits[].new_string // empty] as $e | ($e | length) as $n | if $n < 2 or $n > 48 then "" else [range(0;$n) as $i | range(0;$n) as $j | select($i != $j) | (($e[$i] | tostring) | .[-512:]) + (($e[$j] | tostring) | .[0:512])] | join("\n") end'
-    ;;
+  multiedit) extract_or_block '[.tool_input.edits[].new_string // empty] | join("\n") + "\n" + join("")' ;;
   notebookedit) extract_or_block '.tool_input.new_source // empty' ;;
   # Every string the payload carries, rather than an early exit: this guard is not the surface for tools it does not handle, but a name it cannot map still reached a write-family matcher, and letting it through unscanned is the fail-open that mapping was supposed to prevent.
   *) extract_or_block '[.tool_input | .. | strings] | join("\n")' ;;
 esac
 
-[ -z "$CONTENT" ] && [ -z "$BOUNDARY" ] && exit 0
+[ -z "$CONTENT" ] && exit 0
 
 # No generator bail-out here: file content naming the generator never means the generator produced it. See README § The generator.
 if printf '%s\n' "$CONTENT" | grep -qE -- "$SECRET_PATTERN"; then
-  # Falls through to the boundary probe rather than exiting: an exempt literal in one edit says nothing about a value assembled across two others.
   if fixture_exempt "$CONTENT"; then
     echo "WRITE-SECRET GUARD: allowed — every matched literal is a sanctioned fixture in fixtures.allow: $SECRET_GUARD_EXEMPTED" >&2
-  else
-    echo "WRITE-SECRET GUARD: this $TOOL call would write a raw secret-shaped literal (private key / AWS access key / Slack bot token / GitLab PAT) into a file. Use a reference (env var, masked-cache path) instead of the literal value — never hardcode it into code. If it is a test fixture, add its exact value to the plugin's fixtures.allow — generating one with scripts/fixture-value.sh does not exempt it on this surface, the value still has to be listed. Do not assemble it from fragments to get past this guard." >&2
-    exit 2
+    exit 0
   fi
-fi
-
-if [ -n "$BOUNDARY" ] && printf '%s\n' "$BOUNDARY" | grep -qE -- "$SECRET_PATTERN"; then
-  # Over fixture_exempt's size cap this refuses and blocks, which is the safe direction and the same choice the cap itself makes.
-  if ! fixture_exempt "$BOUNDARY"; then
-    echo "WRITE-SECRET GUARD: this $TOOL call assembles a raw secret-shaped literal across two of its edits — no single edit carries the whole value, but the file it writes would. Write the value as a reference (env var, masked-cache path) instead, or if it is a test fixture, put it whole in one edit and add its exact value to the plugin's fixtures.allow. Splitting a value across edits is the bypass this check exists to close, not a way around the guard." >&2
-    exit 2
-  fi
+  echo "WRITE-SECRET GUARD: this $TOOL call would write a raw secret-shaped literal (private key / AWS access key / Slack bot token / GitLab PAT) into a file. Use a reference (env var, masked-cache path) instead of the literal value — never hardcode it into code. If it is a test fixture, add its exact value to the plugin's fixtures.allow — generating one with scripts/fixture-value.sh does not exempt it on this surface, the value still has to be listed. Do not assemble it from fragments to get past this guard." >&2
+  exit 2
 fi
 
 exit 0

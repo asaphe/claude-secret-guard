@@ -7,17 +7,26 @@ if [ -z "$INPUT" ] || ! printf '%s' "$INPUT" | jq -e 'type == "object"' >/dev/nu
   echo "OP-READ GUARD: cannot read the hook payload — it is empty, not a JSON object, or jq is missing. Blocking: the guard cannot confirm this command is safe." >&2
   exit 2
 fi
+# Read first, because it decides what a refusal below actually means to the caller.
+if ! HOOK_EVENT=$(printf '%s' "$INPUT" | jq -r '.hook_event_name // empty' 2>/dev/null); then
+  echo "OP-READ GUARD: cannot read the hook payload — jq is missing or the JSON did not parse. Refusing: the guard cannot confirm this command is safe." >&2
+  exit 2
+fi
+
+# The same refusal means different things on the two events, and claiming a block on the post-run pass tells the caller to retry a read that already happened — spending a second biometric prompt for a value they are already holding.
+if [ "$HOOK_EVENT" = "PostToolUse" ]; then
+  CONSEQUENCE="The command has already run and is not blocked; this pass only records it, so the read went unrecorded and a later identical read will not be flagged as a duplicate."
+else
+  CONSEQUENCE="Blocking: the guard cannot confirm this command is safe."
+fi
+
 # Blocks rather than allows: jq failing here yields an empty value that every check below reads as "nothing to inspect", silently disarming the guard.
 if ! CMD=$(printf '%s' "$INPUT" | jq -r '.tool_input.command // empty' 2>/dev/null); then
-  echo "OP-READ GUARD: cannot read the hook payload — jq is missing or the JSON did not parse. Blocking: the guard cannot confirm this command is safe." >&2
+  echo "OP-READ GUARD: cannot read the hook payload — jq is missing or the JSON did not parse. $CONSEQUENCE" >&2
   exit 2
 fi
 if ! SESSION_ID=$(printf '%s' "$INPUT" | jq -r '.session_id // empty' 2>/dev/null); then
-  echo "OP-READ GUARD: cannot read the hook payload — jq is missing or the JSON did not parse. Blocking: the guard cannot confirm this command is safe." >&2
-  exit 2
-fi
-if ! HOOK_EVENT=$(printf '%s' "$INPUT" | jq -r '.hook_event_name // empty' 2>/dev/null); then
-  echo "OP-READ GUARD: cannot read the hook payload — jq is missing or the JSON did not parse. Blocking: the guard cannot confirm this command is safe." >&2
+  echo "OP-READ GUARD: cannot read the hook payload — jq is missing or the JSON did not parse. $CONSEQUENCE" >&2
   exit 2
 fi
 
@@ -122,7 +131,7 @@ TRACK_FILE="/tmp/claude-op-reads-${SESSION_ID}"
 
 # Checked before the read too: a planted file would also poison the duplicate verdict below.
 if [ -L "$TRACK_FILE" ] || { [ -e "$TRACK_FILE" ] && { [ ! -f "$TRACK_FILE" ] || [ ! -O "$TRACK_FILE" ]; }; }; then
-  echo "OP-READ GUARD: $TRACK_FILE is not a regular file owned by this user — refusing to use it. A planted symlink would redirect this append into any file you can write, and a planted regular file would collect the references you fetch. Remove it and retry." >&2
+  echo "OP-READ GUARD: $TRACK_FILE is not a regular file owned by this user — refusing to use it. A planted symlink would redirect this append into any file you can write, and a planted regular file would collect the references you fetch. Remove it. $CONSEQUENCE" >&2
   exit 2
 fi
 

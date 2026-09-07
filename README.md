@@ -386,32 +386,6 @@ One shape cannot currently be allowlisted: a Slack bot token is matched by its
 be a complete value, so listing the full token works while a truncated one is
 refused. Nothing else about Slack detection changed.
 
-## Split writes
-
-A `MultiEdit` payload carries several `new_string` values that land in one
-file, so a value split across them is contiguous once written even though
-no single edit holds it. The guard scans the edits joined with newlines and
-joined with nothing, and that second half catches a split across *adjacent*
-array entries — but `join("")` concatenates in array order, so an
-intervening edit keeps two fragments apart and the assembled value was
-missed.
-
-Every ordered pair of edits is now probed as well: the last 512 bytes of one
-against the first 512 bytes of the other, in both directions, since where an
-edit lands in the file is independent of its array position. A pair whose
-facing ends form a guarded shape blocks.
-
-Two bounds, both deliberate. The window is 512 bytes each side, which covers
-every shape in the catalog with room to spare but would miss a split more
-than 512 bytes from the boundary of a token longer than that. And the probe
-is quadratic in the *edit count*, so it is built for up to 48 edits: at that
-size it costs about 0.3s against 2.2s at 100 edits and no return at all by
-200, which is exactly the hang that the fixture-exemption cap exists to
-prevent. Past 48 edits only the in-order concatenation is scanned.
-
-A split across three or more edits is still not detected — covering it needs
-combinations rather than pairs, and the input multiplies accordingly.
-
 ## Why there is no allowlist-config exemption
 
 Earlier versions let `write-secret-guard.sh` exit 0 without scanning when the
@@ -466,9 +440,14 @@ rather than typing one.
   that the named file is anywhere sensible.
 - Normalization covers every respelling that still spells the verb as adjacent
   words. A verb assembled at runtime from an expansion is not matched.
-- A `MultiEdit` value split across three or more edits is not detected, and a
-  split across two is probed only within 512 bytes of each edit's boundary and
-  only up to 48 edits — see § Split writes for why each bound is there.
+- A `MultiEdit` value split so that no two fragments are adjacent in array order
+  is not detected: the guard concatenates the edits in order, so an intervening
+  edit keeps the halves apart, and a sequential rewrite (edit 1 replacing text
+  edit 0 inserted) can assemble a value from two fragments that are each at the
+  head of their own edit. A cross-edit adjacency probe was tried and withdrawn:
+  which text ends up adjacent depends on the file being edited, which the hook
+  payload does not contain, so every model of it is a guess that is both too
+  narrow and too broad.
 - On the AWS side only Secrets Manager carries a predicate.
   `aws ssm get-parameter --with-decryption`, `aws kms decrypt` and
   `aws sts get-session-token` all print a plaintext value and none is matched.
