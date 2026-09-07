@@ -54,6 +54,7 @@ case "$args" in
                jq -nc --argjson n "$n" '{SecretValues: [range($n) | {Name: "s\(.)", SecretString: "value-\(.)"}]}' ;;
       denied)  echo "An error occurred (AccessDeniedException) when calling the operation" >&2; exit 254 ;;
       garbage) echo "not json at all"; exit 0 ;;
+      nonarray) jq -nc '{SecretValues: "abcdefghij"}' ;;
       partial) jq -nc --argjson n "$n" '{SecretValues: [range($n - 1) | {Name: "s\(.)", SecretString: "value-\(.)"}], Errors: [{SecretId: "arn:aws:secretsmanager:us-east-1:1:secret:denied-one", ErrorCode: "AccessDeniedException"}]}' ;;
       tail-fails)
         if [ "$calls" -eq 1 ]; then
@@ -113,6 +114,11 @@ run 3 garbage --values
 expect_exit "an unparseable batch response fails the run" 1 "$?"
 if grep -q "not json at all" "$WORK/err"; then bad "an unparseable response is withheld from stderr" "raw output was echoed"; else ok "an unparseable response is withheld from stderr"; fi
 
+run 3 nonarray --values
+expect_exit "a non-list SecretValues fails the run rather than inflating the count" 1 "$?"
+expect_stderr "a non-list SecretValues is diagnosed, not a raw jq abort" "is not a list"
+if grep -q "abcdefghij" "$WORK/err"; then bad "a non-list SecretValues is withheld from stderr" "the response fragment was echoed"; else ok "a non-list SecretValues is withheld from stderr"; fi
+
 run 3 list-fails --values
 expect_exit "a failed list propagates the CLI's exit code" 253 "$?"
 
@@ -127,15 +133,26 @@ expect_lines "the default listing prints name and description per secret" 3
 unguarded_expansions() {  # unguarded_expansions <path>
   grep -rh 'PROFILE_ARGS\[@\]' "$1" \
     | sed 's/PROFILE_ARGS\[@\]+"[^"]*"//g' \
-    | grep -c 'PROFILE_ARGS\[@\]'
+    | grep -o 'PROFILE_ARGS\[@\]' | wc -l | tr -d ' '
+}
+
+guarded_expansions() {  # guarded_expansions <path>
+  grep -rho 'PROFILE_ARGS\[@\]+' "$1" | wc -l | tr -d ' '
 }
 
 DOLLAR='$'
-printf 'X=(a); echo "%s{PROFILE_ARGS[@]}"\n' "$DOLLAR" > "$WORK/control.sh"
-if [ "$(unguarded_expansions "$WORK/control.sh")" -eq 0 ]; then
-  bad "the unguarded-expansion probe can see one" "the known-positive control was not detected"
+printf 'X=(a); echo "%s{PROFILE_ARGS[@]}" "%s{PROFILE_ARGS[@]}"\n' "$DOLLAR" "$DOLLAR" > "$WORK/control.sh"
+if [ "$(unguarded_expansions "$WORK/control.sh")" -eq 2 ]; then
+  ok "the unguarded-expansion probe counts occurrences, not lines"
 else
-  ok "the unguarded-expansion probe can see one"
+  bad "the unguarded-expansion probe counts occurrences, not lines" "expected 2 on the control, got $(unguarded_expansions "$WORK/control.sh")"
+fi
+
+# Without this, the clean verdict below is also what an empty or mistyped corpus returns.
+if [ "$(guarded_expansions "$ROOT/scripts/")" -ge 1 ]; then
+  ok "the probe reached the real scripts corpus"
+else
+  bad "the probe reached the real scripts corpus" "no guarded expansion found either — the corpus was not read"
 fi
 
 if [ "$(unguarded_expansions "$ROOT/scripts/")" -eq 0 ]; then

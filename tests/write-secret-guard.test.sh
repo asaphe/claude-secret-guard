@@ -78,8 +78,31 @@ done
 guard "$(jq -nc --arg s "$KEY" '{tool_name:"Edit", tool_input:{file_path:"/repo/.gitleaks.toml", new_string:$s}}')"
 expect_exit "Edit: a key in .gitleaks.toml is no longer exempt" 2 "$?"
 
+guard "$(jq -nc --arg s "$KEY" '{tool_name:"MultiEdit", tool_input:{edits:[{new_string:12345}]}}')"
+expect_exit "MultiEdit: a numeric new_string carries no shape and is allowed" 0 "$?"
+
+guard "$(jq -nc --arg s "$KEY" '{tool_name:"MultiEdit", tool_input:{edits:[{new_string:{v:$s}}]}}')"
+expect_exit "MultiEdit: a key nested in an object new_string still blocks" 2 "$?"
+
+guard "$(jq -nc --arg s "$KEY" '{tool_name:"MultiEdit", tool_input:{edits:[{new_string:[$s]}]}}')"
+expect_exit "MultiEdit: a key inside an array new_string still blocks" 2 "$?"
+
+# Known gap, pinned so a future change to the join() halves shows up here: join("") concatenates in array order, so an intervening edit keeps the fragments apart.
+guard "$(jq -nc --arg a "${KEY:0:10}" --arg b "${KEY:10}" '{tool_name:"MultiEdit", tool_input:{edits:[{new_string:$a},{new_string:"unrelated"},{new_string:$b}]}}')"
+expect_exit "MultiEdit: a key split across NON-adjacent edits is not detected (known gap)" 0 "$?"
+
 guard "$(jq -nc --arg s "$KEY" '{tool_name:"SomethingElse", tool_input:{content:$s}}')"
 expect_exit "an unhandled tool name is not this guard's surface" 0 "$?"
+
+# Past fixture_exempt's size cap the span loop is quadratic: 600 KB used not to return at all, and a guard that never returns never delivers its block.
+if command -v timeout >/dev/null 2>&1; then
+  PAD=$(head -c 300000 /dev/zero | tr '\0' 'x')
+  BIG=$(jq -nc --arg s "$KEY" --arg p "$PAD" '{tool_name:"Write", tool_input:{file_path:"/tmp/probe", content:($p + " " + $s + " " + $p)}}')
+  printf '%s' "$BIG" | timeout 20 bash "$ROOT/scripts/write-secret-guard.sh" >/dev/null 2>&1
+  expect_exit "a 600 KB write carrying a key blocks instead of hanging" 2 "$?"
+else
+  ok "a 600 KB write carrying a key blocks instead of hanging (skipped: no timeout(1))"
+fi
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

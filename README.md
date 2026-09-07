@@ -274,7 +274,10 @@ CLI refused, an unparseable response, or per-secret `Errors[]` inside an
 otherwise successful call — marks the run `INCOMPLETE` and exits non-zero
 (the AWS CLI's own status where there was one, `1` otherwise). Partial
 results are still printed, so a caller that branches on the exit code
-never mistakes a truncated audit for a complete one.
+never mistakes a truncated audit for a complete one — but branch on `$?`
+(or `${PIPESTATUS[0]}`), never on the length of the output: a run that
+fetched 5 of 25 still emits a well-formed 5-element result, and piping it
+into `jq` replaces the script's status with `jq`'s.
 
 `scripts/op-cache-cleanup.sh` is a `Stop` hook that purges both cache
 directories when the session ends, so values don't sit in `/tmp`

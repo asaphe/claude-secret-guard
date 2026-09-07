@@ -67,6 +67,9 @@ EOF
 fixture_exempt() {
   local text="$1" allow ordered matched span residual rest before exempted=""
 
+  # Bounded because the span-subtraction loop below is quadratic in the text length: 64 KB costs ~1s, 600 KB does not return, and a guard that never returns never delivers its block. Refusing the exemption blocks, which is the safe direction.
+  [ "${#text}" -le 65536 ] || return 1
+
   allow=$(fixture_allowlist) || return 1
 
   printf '%s' "$text" | grep -qE -- "$SECRET_PATTERN" || return 1

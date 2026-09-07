@@ -94,6 +94,13 @@ fetch_batch() {  # fetch_batch <arn...>
     printf 'aws-batch-secrets: batch %s could not fetch:\n%s\n' "$BATCH_NUM" "$errors" >&2
   fi
 
+  # Checked before counting: jq 'length' reports 10 for a 10-character string, and the `add` below would otherwise abort with the response fragment quoted in its error.
+  if ! printf '%s\n' "$batch_results" | jq -e 'type == "array"' >/dev/null 2>&1; then
+    [ "$FAILED_RC" -ne 0 ] || FAILED_RC=1
+    echo "aws-batch-secrets: batch $BATCH_NUM returned a SecretValues that is not a list; raw output withheld because it carries response content." >&2
+    return 0
+  fi
+
   count=$(printf '%s\n' "$batch_results" | jq 'length')
   FETCHED=$((FETCHED + count))
   ALL_RESULTS=$(printf '%s %s\n' "$ALL_RESULTS" "$batch_results" | jq -s 'add')
