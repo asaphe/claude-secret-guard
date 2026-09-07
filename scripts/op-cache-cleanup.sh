@@ -8,7 +8,7 @@ if ! SESSION_ID=$(printf '%s' "$INPUT" | jq -r '.session_id // empty' 2>/dev/nul
   exit 0
 fi
 if [ -z "$SESSION_ID" ]; then
-  echo "OP-CACHE CLEANUP: the payload carried no session_id, so the purge cannot be scoped. Cached secrets under /tmp/op-cache-* and /tmp/sm-cache-* may persist." >&2
+  echo "OP-CACHE CLEANUP: the payload carried no session_id, so the purge cannot be scoped. Cached secrets under /tmp/op-cache-* and /tmp/sm-cache-* may persist; the duplicate-read tracker prunes itself after 12 hours." >&2
 fi
 
 if [ -n "$SESSION_ID" ]; then

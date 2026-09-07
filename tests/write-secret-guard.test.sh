@@ -91,8 +91,28 @@ expect_exit "MultiEdit: a key inside an array new_string still blocks" 2 "$?"
 guard "$(jq -nc --arg a "${KEY:0:10}" --arg b "${KEY:10}" '{tool_name:"MultiEdit", tool_input:{edits:[{new_string:$a},{new_string:"unrelated"},{new_string:$b}]}}')"
 expect_exit "MultiEdit: a key split across NON-adjacent edits is not detected (known gap)" 0 "$?"
 
+# The second known gap, from the other direction: MultiEdit applies edits in sequence, so edit 1 can rewrite text edit 0 just inserted, leaving both fragments at the HEAD of their own new_string.
+guard "$(jq -nc --arg a "${KEY:0:8}" --arg b "${KEY:8}" '{tool_name:"MultiEdit", tool_input:{edits:[{old_string:"X", new_string:($a + "__JUNK__")},{old_string:"__JUNK__", new_string:$b}]}}')"
+expect_exit "MultiEdit: a key assembled by a sequential rewrite is not detected (known gap)" 0 "$?"
+
+guard "$(jq -nc '{tool_name:"MultiEdit", tool_input:{edits:[{new_string:"alpha"},{new_string:"beta"},{new_string:"gamma"}]}}')"
+expect_exit "MultiEdit: ordinary text across several edits is allowed" 0 "$?"
+
+# Pinned because a cross-edit adjacency probe was tried and withdrawn for blocking exactly this: two ordinary prose edits the file never places next to each other.
+guard "$(jq -nc '{tool_name:"MultiEdit", tool_input:{edits:[{new_string:"# Regions covered: EMEA and ASIA"},{new_string:"unrelated middle edit"},{new_string:"PACIFICNORTHWEST rollout notes"}]}}')"
+expect_exit "MultiEdit: ordinary prose across edits is not blocked by invented adjacency" 0 "$?"
+
 guard "$(jq -nc --arg s "$KEY" '{tool_name:"SomethingElse", tool_input:{content:$s}}')"
-expect_exit "an unhandled tool name is not this guard's surface" 0 "$?"
+expect_exit "an unmapped tool name still has its strings scanned" 2 "$?"
+
+guard "$(jq -nc '{tool_name:"SomethingElse", tool_input:{content:"nothing to see"}}')"
+expect_exit "an unmapped tool name carrying no shape is allowed" 0 "$?"
+
+guard "$(jq -nc --arg s "$KEY" '{tool_name:"multiedit", tool_input:{edits:[{new_string:$s}]}}')"
+expect_exit "a lowercased tool name maps to the same arm" 2 "$?"
+
+guard "$(jq -nc --arg s "$KEY" '{tool_name:"NOTEBOOKEDIT", tool_input:{new_source:$s}}')"
+expect_exit "an uppercased tool name maps to the same arm" 2 "$?"
 
 # Past fixture_exempt's size cap the span loop is quadratic: 600 KB used not to return at all, and a guard that never returns never delivers its block.
 if command -v timeout >/dev/null 2>&1; then

@@ -30,7 +30,9 @@ if [ -z "$SECRET_ID" ]; then
   exit 64
 fi
 
-SESSION_ID="${CLAUDE_CODE_SESSION_ID:-pid-${PPID}}"
+# shellcheck source-path=SCRIPTDIR
+source "$(dirname "${BASH_SOURCE[0]}")/session-namespace.sh"
+SESSION_ID=$(session_namespace)
 CACHE_DIR="/tmp/sm-cache-${SESSION_ID}"
 # Created private rather than widened afterwards: between mkdir and chmod the directory sat at the process umask, readable by any local user.
 (umask 077; mkdir -p "$CACHE_DIR")
@@ -53,11 +55,26 @@ if [ "$REFRESH" -eq 0 ] && [ -s "$CACHE_FILE" ]; then
   exit 0
 fi
 
+if ! command -v jq >/dev/null 2>&1; then
+  echo "sm-cache.sh: jq is required to tell an absent SecretString from one whose value is the text 'None' — install jq." >&2
+  exit 1
+fi
+
 PROFILE_ARGS=()
 [ -n "$PROFILE" ] && PROFILE_ARGS=(--profile "$PROFILE")
 # Streams stay separate like op-cache.sh: merged in, a benign CLI notice on a *successful* call is cached as part of the secret; the ${a[@]+…} form keeps bash 3.2 from aborting on the empty array.
-VALUE=$(aws secretsmanager get-secret-value ${PROFILE_ARGS[@]+"${PROFILE_ARGS[@]}"} --secret-id "$SECRET_ID" --query SecretString --output text) \
+RESPONSE=$(aws secretsmanager get-secret-value ${PROFILE_ARGS[@]+"${PROFILE_ARGS[@]}"} --secret-id "$SECRET_ID" --output json) \
   || exit $?
+
+# Not `--query SecretString --output text`: that renders an absent field as the literal "None" (the CLI's text formatter printing Python's None), which passes the emptiness check below and caches "None" as a 4-byte secret. Selecting from the JSON distinguishes an absent field from a secret whose value really is the string "None".
+if ! VALUE=$(printf '%s' "$RESPONSE" | jq -er '.SecretString' 2>/dev/null); then
+  if printf '%s' "$RESPONSE" | jq -e 'has("SecretBinary")' >/dev/null 2>&1; then
+    echo "sm-cache: $SECRET_ID holds only SecretBinary, which this wrapper does not cache — read it with the AWS CLI directly and handle the decoding yourself." >&2
+  else
+    echo "sm-cache: no SecretString in the response for $SECRET_ID" >&2
+  fi
+  exit 1
+fi
 if [ -z "$VALUE" ]; then
   echo "sm-cache: empty value returned for $SECRET_ID" >&2
   exit 1

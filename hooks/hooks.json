@@ -40,6 +40,17 @@
         ]
       }
     ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}\"/scripts/op-read-guard.sh"
+          }
+        ]
+      }
+    ],
     "Stop": [
       {
         "matcher": "",

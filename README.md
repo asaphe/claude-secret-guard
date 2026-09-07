@@ -279,9 +279,39 @@ never mistakes a truncated audit for a complete one — but branch on `$?`
 fetched 5 of 25 still emits a well-formed 5-element result, and piping it
 into `jq` replaces the script's status with `jq`'s.
 
+`sm-cache.sh` selects `SecretString` out of the full JSON response rather
+than asking for it with `--query SecretString --output text`. That form
+renders an absent field as the literal string `None` — the AWS CLI's text
+formatter printing Python's `None` — which is four non-empty bytes, so a
+secret holding only `SecretBinary` used to be cached and reported as a
+4-byte value. A binary-only secret now fails closed and says so; a secret
+whose value genuinely is the text `None` still caches correctly. This
+makes `jq` a hard dependency of that wrapper.
+
 `scripts/op-cache-cleanup.sh` is a `Stop` hook that purges both cache
 directories when the session ends, so values don't sit in `/tmp`
 indefinitely.
+
+### Cache namespacing
+
+Caches and the duplicate-read tracker key on the Claude Code session id
+when there is one. Outside a session — a wrapper run straight from a
+shell — the fallback used to be the bare parent PID, and PIDs recycle: two
+unrelated shells could land on one cache path, where a stale hit serves a
+value that has since rotated. The fallback is now
+`uid<uid>-pid<pid>-<hash of the parent's start time>`, so a reissued PID
+resolves to a different namespace and two users on a shared `/tmp` never
+share a path at all. Without `ps` it degrades to uid plus PID rather than
+refusing to run.
+
+The tracker's session-less name was previously the fixed string `shared`,
+identical for every user on the machine. Combined with the ownership check
+that refuses a tracker this user does not own, the first account to create
+it locked every other one out of the guard — on a sticky `/tmp` with no way
+to remove it. There is no shared name any more. Because a `Stop` hook can
+only scope a purge when the payload carried a session id, a tracker created
+outside one also prunes itself after 12 hours instead of refusing reads
+forever against a record nothing will clear.
 
 AWS profile: all three wrapper scripts read `AWS_PROFILE` if set, or fall
 back to whatever your `aws` CLI's own default credential resolution does —
@@ -410,6 +440,14 @@ rather than typing one.
   that the named file is anywhere sensible.
 - Normalization covers every respelling that still spells the verb as adjacent
   words. A verb assembled at runtime from an expansion is not matched.
+- A `MultiEdit` value split so that no two fragments are adjacent in array order
+  is not detected: the guard concatenates the edits in order, so an intervening
+  edit keeps the halves apart, and a sequential rewrite (edit 1 replacing text
+  edit 0 inserted) can assemble a value from two fragments that are each at the
+  head of their own edit. A cross-edit adjacency probe was tried and withdrawn:
+  which text ends up adjacent depends on the file being edited, which the hook
+  payload does not contain, so every model of it is a guess that is both too
+  narrow and too broad.
 - On the AWS side only Secrets Manager carries a predicate.
   `aws ssm get-parameter --with-decryption`, `aws kms decrypt` and
   `aws sts get-session-token` all print a plaintext value and none is matched.

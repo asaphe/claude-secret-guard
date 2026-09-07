@@ -7,13 +7,26 @@ if [ -z "$INPUT" ] || ! printf '%s' "$INPUT" | jq -e 'type == "object"' >/dev/nu
   echo "OP-READ GUARD: cannot read the hook payload — it is empty, not a JSON object, or jq is missing. Blocking: the guard cannot confirm this command is safe." >&2
   exit 2
 fi
+# Read first, because it decides what a refusal below actually means to the caller.
+if ! HOOK_EVENT=$(printf '%s' "$INPUT" | jq -r '.hook_event_name // empty' 2>/dev/null); then
+  echo "OP-READ GUARD: cannot read the hook payload — jq is missing or the JSON did not parse. Refusing: the guard cannot confirm this command is safe." >&2
+  exit 2
+fi
+
+# The same refusal means different things on the two events, and claiming a block on the post-run pass tells the caller to retry a read that already happened — spending a second biometric prompt for a value they are already holding.
+if [ "$HOOK_EVENT" = "PostToolUse" ]; then
+  CONSEQUENCE="The command has already run and is not blocked; this pass only records it, so the read went unrecorded and a later identical read will not be flagged as a duplicate."
+else
+  CONSEQUENCE="Blocking: the guard cannot confirm this command is safe."
+fi
+
 # Blocks rather than allows: jq failing here yields an empty value that every check below reads as "nothing to inspect", silently disarming the guard.
 if ! CMD=$(printf '%s' "$INPUT" | jq -r '.tool_input.command // empty' 2>/dev/null); then
-  echo "OP-READ GUARD: cannot read the hook payload — jq is missing or the JSON did not parse. Blocking: the guard cannot confirm this command is safe." >&2
+  echo "OP-READ GUARD: cannot read the hook payload — jq is missing or the JSON did not parse. $CONSEQUENCE" >&2
   exit 2
 fi
 if ! SESSION_ID=$(printf '%s' "$INPUT" | jq -r '.session_id // empty' 2>/dev/null); then
-  echo "OP-READ GUARD: cannot read the hook payload — jq is missing or the JSON did not parse. Blocking: the guard cannot confirm this command is safe." >&2
+  echo "OP-READ GUARD: cannot read the hook payload — jq is missing or the JSON did not parse. $CONSEQUENCE" >&2
   exit 2
 fi
 
@@ -110,12 +123,37 @@ else
   WHAT="item ${ITEM} → ${NORM}"
 fi
 
-TRACK_FILE="/tmp/claude-op-reads-${SESSION_ID:-shared}"
+# shellcheck source-path=SCRIPTDIR
+source "$(dirname "${BASH_SOURCE[0]}")/session-namespace.sh"
+# No fixed "shared" fallback: that name was the same for every user, so on a sticky /tmp the first to create it locked everyone else out through the ownership refusal below, with no way to remove it.
+[ -n "$SESSION_ID" ] || SESSION_ID=$(session_namespace)
+TRACK_FILE="/tmp/claude-op-reads-${SESSION_ID}"
 
 # Checked before the read too: a planted file would also poison the duplicate verdict below.
 if [ -L "$TRACK_FILE" ] || { [ -e "$TRACK_FILE" ] && { [ ! -f "$TRACK_FILE" ] || [ ! -O "$TRACK_FILE" ]; }; }; then
-  echo "OP-READ GUARD: $TRACK_FILE is not a regular file owned by this user — refusing to use it. The name is predictable (the session-less fallback is literally 'shared'), so a planted symlink would redirect this append into any file you can write, and a planted regular file would collect the references you fetch. Remove it and retry." >&2
+  echo "OP-READ GUARD: $TRACK_FILE is not a regular file owned by this user — refusing to use it. A planted symlink would redirect this append into any file you can write, and a planted regular file would collect the references you fetch. Remove it. $CONSEQUENCE" >&2
   exit 2
+fi
+
+# Self-pruning because the Stop hook can only scope a purge when the payload carried a session id: without this, a tracker created outside one persists until reboot and keeps refusing reads against a record nothing will clear.
+if [ -f "$TRACK_FILE" ] && [ -n "$(find "$TRACK_FILE" -mmin +720 2>/dev/null)" ]; then
+  : >"$TRACK_FILE"
+fi
+
+record() {
+  # The file lists which references were fetched, which maps the credential topology on a shared machine.
+  (umask 077; : >>"$TRACK_FILE")
+  # umask applies only at creation, so an already-existing file keeps whatever mode it was made with.
+  chmod 600 "$TRACK_FILE"
+  # An interrupted append leaves no trailing newline, and concatenating onto that line makes both it and the new key unmatchable by the whole-line test below.
+  [ -s "$TRACK_FILE" ] && [ -n "$(tail -c1 "$TRACK_FILE")" ] && printf '\n' >>"$TRACK_FILE"
+  printf '%s\n' "$KEY" >>"$TRACK_FILE"
+}
+
+# Recording moved off PreToolUse: it ran before the command did, so a fetch the user then denied was still recorded, and the legitimate retry was refused as a duplicate of a read that never happened. PostToolUse only fires once the tool has actually run.
+if [ "$HOOK_EVENT" = "PostToolUse" ]; then
+  record
+  exit 0
 fi
 
 # Whole-line match: a substring match makes a shorter reference collide with a longer one recorded earlier.
@@ -124,11 +162,6 @@ if [ -f "$TRACK_FILE" ] && grep -qxF "$KEY" "$TRACK_FILE"; then
   exit 2
 fi
 
-# The file lists which references were fetched, which maps the credential topology on a shared machine.
-(umask 077; : >> "$TRACK_FILE")
-# umask applies only at creation, so an already-existing file keeps whatever mode it was made with.
-chmod 600 "$TRACK_FILE"
-# An interrupted append leaves no trailing newline, and concatenating onto that line makes both it and the new key unmatchable by the whole-line test above.
-[ -s "$TRACK_FILE" ] && [ -n "$(tail -c1 "$TRACK_FILE")" ] && printf '\n' >> "$TRACK_FILE"
-printf '%s\n' "$KEY" >> "$TRACK_FILE"
+# A payload with no event name predates the PostToolUse wiring, where recording here is the only record that ever happens.
+[ -n "$HOOK_EVENT" ] || record
 exit 0

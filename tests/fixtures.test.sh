@@ -213,6 +213,10 @@ jq -nc '{tool_name:"NotebookEdit", tool_input:{new_source:"benign"}}' \
 expect_exit "control: a benign NotebookEdit still passes" 0 "$?"
 check "NotebookEdit is wired in hooks.json" "matcher does not name it" grep -q 'NotebookEdit' "$ROOT/hooks/hooks.json"
 
+# The dedup guard only CHECKS at PreToolUse. Without this entry nothing ever records, so every read looks like a first read and the guard silently never fires — no error, no output, indistinguishable from working.
+check "op-read-guard is wired on PostToolUse/Bash" "hooks.json does not wire it — the duplicate-read guard would silently never fire" \
+  jq -e '[.hooks.PostToolUse[]? | select(.matcher == "Bash") | .hooks[]? | select(.command | test("op-read-guard\\.sh"))] | length > 0' "$ROOT/hooks/hooks.json"
+
 # --- and one shape definition, not three ---------------------------------------
 COPIES=$(grep -lE "^PATTERN=" "$ROOT"/scripts/*.sh 2>/dev/null | wc -l | tr -d ' ')
 check "no guard carries its own copy of the pattern" "$COPIES script(s) still define PATTERN" [ "$COPIES" = "0" ]

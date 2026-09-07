@@ -27,12 +27,15 @@ extract_or_block() {
   fi
 }
 
-case "$TOOL" in
-  Write)     extract_or_block '.tool_input.content // empty' ;;
-  Edit)      extract_or_block '.tool_input.new_string // empty' ;;
+# Lowercased so a respelled name cannot fall off the end of the arms into an empty CONTENT, which the check below reads as "nothing to inspect".
+case "$(printf '%s' "$TOOL" | tr '[:upper:]' '[:lower:]')" in
+  write)     extract_or_block '.tool_input.content // empty' ;;
+  edit)      extract_or_block '.tool_input.new_string // empty' ;;
   # No `edits[]?` here: the optional iterator turns a malformed edits payload into an empty CONTENT, which the emptiness check below reads as "nothing to inspect" and lets through.
-  MultiEdit) extract_or_block '[.tool_input.edits[].new_string // empty] | join("\n") + "\n" + join("")' ;;
-  NotebookEdit) extract_or_block '.tool_input.new_source // empty' ;;
+  multiedit) extract_or_block '[.tool_input.edits[].new_string // empty] | join("\n") + "\n" + join("")' ;;
+  notebookedit) extract_or_block '.tool_input.new_source // empty' ;;
+  # Every string the payload carries, rather than an early exit: this guard is not the surface for tools it does not handle, but a name it cannot map still reached a write-family matcher, and letting it through unscanned is the fail-open that mapping was supposed to prevent.
+  *) extract_or_block '[.tool_input | .. | strings] | join("\n")' ;;
 esac
 
 [ -z "$CONTENT" ] && exit 0
