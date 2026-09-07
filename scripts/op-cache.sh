@@ -34,7 +34,9 @@ if [[ ! "$URI" =~ ^op:// ]]; then
   exit 64
 fi
 
-SESSION_ID="${CLAUDE_CODE_SESSION_ID:-pid-${PPID}}"
+# shellcheck source-path=SCRIPTDIR
+source "$(dirname "${BASH_SOURCE[0]}")/session-namespace.sh"
+SESSION_ID=$(session_namespace)
 CACHE_DIR="/tmp/op-cache-${SESSION_ID}"
 # Created private rather than widened afterwards: between mkdir and chmod the directory sat at the process umask, readable by any local user.
 (umask 077; mkdir -p "$CACHE_DIR")

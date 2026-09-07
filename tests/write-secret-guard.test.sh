@@ -87,12 +87,46 @@ expect_exit "MultiEdit: a key nested in an object new_string still blocks" 2 "$?
 guard "$(jq -nc --arg s "$KEY" '{tool_name:"MultiEdit", tool_input:{edits:[{new_string:[$s]}]}}')"
 expect_exit "MultiEdit: a key inside an array new_string still blocks" 2 "$?"
 
-# Known gap, pinned so a future change to the join() halves shows up here: join("") concatenates in array order, so an intervening edit keeps the fragments apart.
 guard "$(jq -nc --arg a "${KEY:0:10}" --arg b "${KEY:10}" '{tool_name:"MultiEdit", tool_input:{edits:[{new_string:$a},{new_string:"unrelated"},{new_string:$b}]}}')"
-expect_exit "MultiEdit: a key split across NON-adjacent edits is not detected (known gap)" 0 "$?"
+expect_exit "MultiEdit: a key split across NON-adjacent edits blocks" 2 "$?"
+
+# Reversed order too: MultiEdit applies edits by array position, but where each lands in the file is independent of it, so either fragment may end up first.
+guard "$(jq -nc --arg a "${KEY:0:10}" --arg b "${KEY:10}" '{tool_name:"MultiEdit", tool_input:{edits:[{new_string:$b},{new_string:"unrelated"},{new_string:$a}]}}')"
+expect_exit "MultiEdit: a NON-adjacent split in reverse array order blocks" 2 "$?"
+
+guard "$(jq -nc '{tool_name:"MultiEdit", tool_input:{edits:[{new_string:"alpha"},{new_string:"beta"},{new_string:"gamma"}]}}')"
+expect_exit "MultiEdit: ordinary text across several edits is still allowed" 0 "$?"
+
+# The pair probe is built for up to 48 edits; past that only the in-order concatenation is scanned. Both sides pinned so the cap cannot drift silently.
+SPLIT_AT() {  # SPLIT_AT <total-edits>
+  jq -nc --arg a "${KEY:0:10}" --arg b "${KEY:10}" --argjson n "$1" \
+    '{tool_name:"MultiEdit", tool_input:{edits:([{new_string:$a}] + [range(0;$n-2)|{new_string:"filler"}] + [{new_string:$b}])}}'
+}
+guard "$(SPLIT_AT 48)"
+expect_exit "MultiEdit: a split across 48 edits is within the probe and blocks" 2 "$?"
+guard "$(SPLIT_AT 49)"
+expect_exit "MultiEdit: past the 48-edit cap the split probe is not built (documented limit)" 0 "$?"
+
+# The cap exists to keep this bounded: the probe is quadratic in the edit count, and 200 edits does not return.
+if command -v timeout >/dev/null 2>&1; then
+  WIDE=$(jq -nc --argjson n 48 '{tool_name:"MultiEdit", tool_input:{edits:[range(0;$n)|{new_string:("x"*600)}]}}')
+  printf '%s' "$WIDE" | timeout 10 bash "$ROOT/scripts/write-secret-guard.sh" >/dev/null 2>&1
+  expect_exit "a 48-edit call with full 512-byte windows returns well inside the timeout" 0 "$?"
+else
+  ok "a 48-edit call with full 512-byte windows returns well inside the timeout (skipped: no timeout(1))"
+fi
 
 guard "$(jq -nc --arg s "$KEY" '{tool_name:"SomethingElse", tool_input:{content:$s}}')"
-expect_exit "an unhandled tool name is not this guard's surface" 0 "$?"
+expect_exit "an unmapped tool name still has its strings scanned" 2 "$?"
+
+guard "$(jq -nc '{tool_name:"SomethingElse", tool_input:{content:"nothing to see"}}')"
+expect_exit "an unmapped tool name carrying no shape is allowed" 0 "$?"
+
+guard "$(jq -nc --arg s "$KEY" '{tool_name:"multiedit", tool_input:{edits:[{new_string:$s}]}}')"
+expect_exit "a lowercased tool name maps to the same arm" 2 "$?"
+
+guard "$(jq -nc --arg s "$KEY" '{tool_name:"NOTEBOOKEDIT", tool_input:{new_source:$s}}')"
+expect_exit "an uppercased tool name maps to the same arm" 2 "$?"
 
 # Past fixture_exempt's size cap the span loop is quadratic: 600 KB used not to return at all, and a guard that never returns never delivers its block.
 if command -v timeout >/dev/null 2>&1; then

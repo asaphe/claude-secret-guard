@@ -279,9 +279,39 @@ never mistakes a truncated audit for a complete one — but branch on `$?`
 fetched 5 of 25 still emits a well-formed 5-element result, and piping it
 into `jq` replaces the script's status with `jq`'s.
 
+`sm-cache.sh` selects `SecretString` out of the full JSON response rather
+than asking for it with `--query SecretString --output text`. That form
+renders an absent field as the literal string `None` — the AWS CLI's text
+formatter printing Python's `None` — which is four non-empty bytes, so a
+secret holding only `SecretBinary` used to be cached and reported as a
+4-byte value. A binary-only secret now fails closed and says so; a secret
+whose value genuinely is the text `None` still caches correctly. This
+makes `jq` a hard dependency of that wrapper.
+
 `scripts/op-cache-cleanup.sh` is a `Stop` hook that purges both cache
 directories when the session ends, so values don't sit in `/tmp`
 indefinitely.
+
+### Cache namespacing
+
+Caches and the duplicate-read tracker key on the Claude Code session id
+when there is one. Outside a session — a wrapper run straight from a
+shell — the fallback used to be the bare parent PID, and PIDs recycle: two
+unrelated shells could land on one cache path, where a stale hit serves a
+value that has since rotated. The fallback is now
+`uid<uid>-pid<pid>-<hash of the parent's start time>`, so a reissued PID
+resolves to a different namespace and two users on a shared `/tmp` never
+share a path at all. Without `ps` it degrades to uid plus PID rather than
+refusing to run.
+
+The tracker's session-less name was previously the fixed string `shared`,
+identical for every user on the machine. Combined with the ownership check
+that refuses a tracker this user does not own, the first account to create
+it locked every other one out of the guard — on a sticky `/tmp` with no way
+to remove it. There is no shared name any more. Because a `Stop` hook can
+only scope a purge when the payload carried a session id, a tracker created
+outside one also prunes itself after 12 hours instead of refusing reads
+forever against a record nothing will clear.
 
 AWS profile: all three wrapper scripts read `AWS_PROFILE` if set, or fall
 back to whatever your `aws` CLI's own default credential resolution does —
@@ -356,6 +386,32 @@ One shape cannot currently be allowlisted: a Slack bot token is matched by its
 be a complete value, so listing the full token works while a truncated one is
 refused. Nothing else about Slack detection changed.
 
+## Split writes
+
+A `MultiEdit` payload carries several `new_string` values that land in one
+file, so a value split across them is contiguous once written even though
+no single edit holds it. The guard scans the edits joined with newlines and
+joined with nothing, and that second half catches a split across *adjacent*
+array entries — but `join("")` concatenates in array order, so an
+intervening edit keeps two fragments apart and the assembled value was
+missed.
+
+Every ordered pair of edits is now probed as well: the last 512 bytes of one
+against the first 512 bytes of the other, in both directions, since where an
+edit lands in the file is independent of its array position. A pair whose
+facing ends form a guarded shape blocks.
+
+Two bounds, both deliberate. The window is 512 bytes each side, which covers
+every shape in the catalog with room to spare but would miss a split more
+than 512 bytes from the boundary of a token longer than that. And the probe
+is quadratic in the *edit count*, so it is built for up to 48 edits: at that
+size it costs about 0.3s against 2.2s at 100 edits and no return at all by
+200, which is exactly the hang that the fixture-exemption cap exists to
+prevent. Past 48 edits only the in-order concatenation is scanned.
+
+A split across three or more edits is still not detected — covering it needs
+combinations rather than pairs, and the input multiplies accordingly.
+
 ## Why there is no allowlist-config exemption
 
 Earlier versions let `write-secret-guard.sh` exit 0 without scanning when the
@@ -410,6 +466,9 @@ rather than typing one.
   that the named file is anywhere sensible.
 - Normalization covers every respelling that still spells the verb as adjacent
   words. A verb assembled at runtime from an expansion is not matched.
+- A `MultiEdit` value split across three or more edits is not detected, and a
+  split across two is probed only within 512 bytes of each edit's boundary and
+  only up to 48 edits — see § Split writes for why each bound is there.
 - On the AWS side only Secrets Manager carries a predicate.
   `aws ssm get-parameter --with-decryption`, `aws kms decrypt` and
   `aws sts get-session-token` all print a plaintext value and none is matched.
