@@ -1,20 +1,23 @@
 #!/usr/bin/env bash
 # Shared utility: the secret shapes every content guard matches on, plus the fixture allowlist that subtracts named values from them — see README § Sanctioned fixtures.
 
-# Boundary-free, because an allowlist entry is validated against these with -x, where the value is the whole line.
-SECRET_GUARD_PEM_HEADER='-----BEGIN[ A-Z0-9]*PRIVATE KEY-----'
+# Boundary-free, because each carries its own distinctive leading literal, and an allowlist entry is validated against these with -x, where the value is the whole line.
+SECRET_GUARD_KEY_HEADER='-----BEGIN[ A-Z0-9]*PRIVATE KEY[ A-Z]*-----|PuTTY-User-Key-File-[0-9]'
 
-# One definition, three consumers: a widened copy cannot drift into a single guard.
-SECRET_SHAPES_BOUNDED='(A3T[A-Z0-9]|AKIA|ASIA)[A-Z2-7]{16}\b|xoxb-[0-9]{10,13}-[0-9]{10,13}-[A-Za-z0-9]{24,}|xoxb-[0-9]{10,13}-[0-9]{10,13}|glpat-[A-Za-z0-9_-]{20,}'
+# One definition, four consumers: a widened copy cannot drift into a single guard.
+SECRET_SHAPES_BOUNDED='(A3T[A-Z0-9]|AKIA|ASIA)[A-Z2-7]{16}\b|xoxb-[0-9]{10,13}-[0-9]{10,13}-[A-Za-z0-9]{24,}|xox[apres]-[0-9A-Za-z-]{20,}|xapp-[0-9]-[A-Za-z0-9-]{20,}|gl(pat|rt|dt|cbt|ptt|oas|soat|agent|ft)-[A-Za-z0-9_-]{20,}'
 
-# What the guards detect. The bare Slack prefix stays here so a truncated token in source is still flagged.
-SECRET_SHAPES="$SECRET_GUARD_PEM_HEADER|$SECRET_SHAPES_BOUNDED"
+# Detection only, never allowlistable: a bot token truncated in source has still leaked the team and bot IDs, which are the halves every rotation of that credential shares.
+SECRET_SHAPES_PREFIX_ONLY='xoxb-[0-9]{10,13}-[0-9]{10,13}'
 
-# What an allowlist entry may be, which is not the same corpus: the bare prefix is a *fragment* of a token, and accepting one as complete subtracts the team and bot IDs every rotation of that credential shares.
-SECRET_SHAPES_COMPLETE="$SECRET_GUARD_PEM_HEADER|(A3T[A-Z0-9]|AKIA|ASIA)[A-Z2-7]{16}\b|xoxb-[0-9]{10,13}-[0-9]{10,13}-[A-Za-z0-9]{24,}|glpat-[A-Za-z0-9_-]{20,}"
+# What the guards detect.
+SECRET_SHAPES="$SECRET_GUARD_KEY_HEADER|$SECRET_SHAPES_BOUNDED|$SECRET_SHAPES_PREFIX_ONLY"
 
-# A two-character escape counts as a left boundary (\b fails before a key written as "…\nAKIA…"), while PEM stays a top-level alternative — where the three duplicated copies had it — because a header carries its own leading dashes and needs no boundary.
-SECRET_PATTERN="((^|[^0-9A-Za-z]|\\\\[nrtv])($SECRET_SHAPES_BOUNDED)|$SECRET_GUARD_PEM_HEADER)"
+# What an allowlist entry may be, which is not the same corpus: a bare prefix is a *fragment* of a token, and accepting one as complete subtracts every rotation that shares it.
+SECRET_SHAPES_COMPLETE="$SECRET_GUARD_KEY_HEADER|$SECRET_SHAPES_BOUNDED"
+
+# A two-character escape counts as a left boundary (\b fails before a key written as "…\nAKIA…"), while the key headers stay top-level alternatives because each carries its own leading literal and needs no boundary.
+SECRET_PATTERN="((^|[^0-9A-Za-z]|\\\\[nrtv])($SECRET_SHAPES_BOUNDED|$SECRET_SHAPES_PREFIX_ONLY)|$SECRET_GUARD_KEY_HEADER)"
 
 # Resolved from this file rather than the plugin root so a guard always reads the allowlist shipped beside it.
 SECRET_GUARD_ALLOWLIST="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/fixtures.allow"
@@ -29,9 +32,9 @@ fixture_allowlist() {
   local line
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in '' | '#'*) continue ;; esac
-    # A header is byte-identical in a live key, so honouring one would blind the whole PEM family.
-    if printf '%s' "$line" | grep -qE -- "$SECRET_GUARD_PEM_HEADER"; then
-      echo "SECRET GUARD: ignoring the PEM header entry in $SECRET_GUARD_ALLOWLIST — a header is identical in a real private key, so it can never be a fixture. Generate PEM fixtures with scripts/fixture-value.sh pem-private-key." >&2
+    # A header is byte-identical in a live key, so honouring one would blind the whole private-key family.
+    if printf '%s' "$line" | grep -qE -- "$SECRET_GUARD_KEY_HEADER"; then
+      echo "SECRET GUARD: ignoring the private-key header entry in $SECRET_GUARD_ALLOWLIST — a PEM or PuTTY header is identical in a real key, so it can never be a fixture. Generate PEM fixtures with scripts/fixture-value.sh pem-private-key." >&2
       continue
     fi
     # Validated against the complete-values corpus, so a fragment that happens to match a detection alternative is still refused.

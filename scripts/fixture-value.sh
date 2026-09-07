@@ -7,7 +7,7 @@ set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/secret-shapes.sh"
 
 usage() {
-  echo "usage: fixture-value.sh <aws-access-key|slack-bot-token|gitlab-pat|pem-private-key>" >&2
+  echo "usage: fixture-value.sh <aws-access-key|slack-bot-token|slack-user-token|slack-app-token|gitlab-pat|gitlab-runner-token|pem-private-key>" >&2
   echo "Takes a shape name and nothing else — there is no argument that accepts a value, which is what makes this incapable of emitting a real secret." >&2
   exit 64
 }
@@ -27,7 +27,10 @@ SHAPE="$1"
 case "$SHAPE" in
   aws-access-key)   VALUE="AKIA$(rand_chars 'A-Z2-7' 16)" ;;
   slack-bot-token)  VALUE="xoxb-$(rand_chars '0-9' 11)-$(rand_chars '0-9' 12)-$(rand_chars 'A-Za-z0-9' 24)" ;;
+  slack-user-token) VALUE="xoxp-$(rand_chars 'A-Za-z0-9' 24)" ;;
+  slack-app-token)  VALUE="xapp-1-$(rand_chars 'A-Za-z0-9' 24)" ;;
   gitlab-pat)       VALUE="glpat-$(rand_chars 'A-Za-z0-9' 20)" ;;
+  gitlab-runner-token) VALUE="glrt-$(rand_chars 'A-Za-z0-9' 20)" ;;
   pem-private-key)
     command -v openssl >/dev/null 2>&1 || {
       echo "fixture-value.sh: pem-private-key needs the openssl CLI, which is not on PATH." >&2

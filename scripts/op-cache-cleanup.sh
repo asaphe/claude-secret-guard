@@ -14,7 +14,7 @@ fi
 if [ -n "$SESSION_ID" ]; then
   rm -rf "/tmp/op-cache-${SESSION_ID}"
   rm -rf "/tmp/sm-cache-${SESSION_ID}"
-  # Left behind, this makes the duplicate-read guard refuse every reference again in any session reusing this id.
+  # Left behind, this makes op-read-guard block every reference again in any session reusing this id.
   rm -f "/tmp/claude-op-reads-${SESSION_ID}"
 fi
 

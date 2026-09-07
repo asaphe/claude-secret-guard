@@ -31,8 +31,9 @@ closes the highest-value slice of that surface:
    `batch-get-secret-value` when called directly, and points at the masked
    wrapper scripts instead (see below).
 
-**This is deliberately not comprehensive.** The pattern set (PEM headers,
-AWS access keys, Slack bot tokens, GitLab PATs) is the same narrow,
+**This is deliberately not comprehensive.** The pattern set (PEM and PuTTY
+private-key headers, AWS access keys, Slack bot/user/app tokens, the GitLab
+token families) is the same narrow,
 near-zero-false-positive list everywhere in this plugin, on purpose — a
 false positive on `Write`/`Edit` breaks the task outright, unlike a
 post-hoc log scanner where a false positive is free. If you want broad,
@@ -212,6 +213,34 @@ filename: that is what let a `find`-shaped *argument* to a reader —
 exemption can therefore only ever skip a token containing `*` or `?`,
 which is what the reported false positive always was.
 
+### Why grep is gated unconditionally
+
+`grep` is treated as a reader whether or not `-r` is present. The recursive
+flag decides *how many* files are read, never whether the one named is a key:
+`grep AKIA .env` reads `.env` exactly as `grep -r AKIA .` reaches it. Gating on
+`-r` would have exempted the single-file spelling, which is the common one.
+
+The same reasoning admits a reader named by path — `/bin/cat`, `./cat` — since
+the basename is what decides, not how the binary was spelled.
+
+### Why the pattern operand is scanned
+
+`grep AKIA... secrets.pem` names two things: a pattern and a file. Only the
+second is read, so an earlier version tried to model `grep`'s flag grammar
+well enough to skip the pattern operand and judge the file alone.
+
+That modelling is where the fail-opens were. `grep` takes its pattern from a
+flag (`-e`, `-f`), from an `--include`/`--exclude` glob, or positionally, and
+which one applies depends on flags that may be bundled (`-rne`), separated
+from their value, or spelled long with `=`. Every simplification of that
+grammar left a spelling where the *file* operand was classified as the pattern
+and went unscanned.
+
+So every token is scanned, the pattern operand included. The cost is a prompt
+on `grep secrets.pem README.md`, where the key-shaped word is what is being
+searched *for* rather than read — rare, and it fails safe. The alternative
+failed the other way, silently, on four spellings.
+
 ## Why one Bash authority script, not several parallel hooks
 
 `hooks/hooks.json` registers a single script (`bash-secret-authority.sh`)
@@ -268,9 +297,10 @@ uses it.
   unlisted match blocks the whole call — otherwise a command carrying an
   approved fixture alongside a real credential would pass.
 - A missing or unreadable file blocks everything.
-- A PEM header can never be listed. It is byte-identical in a real private key,
-  so honouring one would blind the guards to every private key; such an entry
-  is ignored and announced on stderr. Generate PEM fixtures instead.
+- A private-key header can never be listed, PEM or PuTTY. It is byte-identical
+  in a real key, so honouring one would blind the guards to every private key;
+  such an entry is ignored and announced on stderr. Generate PEM fixtures
+  instead.
 - An entry must be a **complete** value of a guarded shape, not a fragment or a
   prefix. A prefix would subtract the part every rotation of the same
   credential shares, so listing one fixture would silently exempt its
@@ -292,7 +322,8 @@ named values; it never reshapes a shape.
 ### The generator
 
 `scripts/fixture-value.sh <shape>` prints one conforming value on stdout for
-`aws-access-key`, `slack-bot-token`, `gitlab-pat`, or `pem-private-key`. It
+`aws-access-key`, `slack-bot-token`, `slack-user-token`, `slack-app-token`,
+`gitlab-pat`, `gitlab-runner-token`, or `pem-private-key`. It
 takes a shape name and nothing else — there is no argument that accepts a
 value, which is what makes it incapable of emitting a real secret. It also
 checks its own output against the guard pattern before printing, because a
@@ -314,27 +345,31 @@ One shape cannot currently be allowlisted: a Slack bot token is matched by its
 be a complete value, so listing the full token works while a truncated one is
 refused. Nothing else about Slack detection changed.
 
-## Allowlist-config exemption
+## Why there is no allowlist-config exemption
 
-`write-secret-guard.sh` exits 0 without scanning when the write targets a
-secret-scanner allowlist: `.gitleaks.toml`, `gitleaks.toml`, `.gitleaksignore`,
-or `.secretsignore`. Those files exist to enumerate the values a scanner should
-ignore, so a synthetic fixture literal is their legitimate content — and without
-the exemption the guard blocks the one edit that makes another scanner stop
-firing on test fixtures. Matching is on the exact basename, so a lookalike
-(`my.gitleaks.toml.bak`, `gitleaks.toml.tmpl`) is still scanned.
+Earlier versions let `write-secret-guard.sh` exit 0 without scanning when the
+write targeted a secret-scanner allowlist — `.gitleaks.toml`, `gitleaks.toml`,
+`.gitleaksignore`, `.secretsignore` — on the reasoning that enumerating ignored
+values is what those files are for. That exemption is gone as of 0.5.0.
 
-`write-secret-guard-bash.sh` deliberately does **not** carry the exemption. The
-tool-side guard reads a structured `file_path` and knows exactly what is being
-written; the Bash-side guard sees only a command string, where the real target
-has to be inferred and can be inferred wrongly — `tee .gitleaks.toml other.env`
-writes both, and a redirect can be hidden behind a variable or a later pipe
-stage. An exemption there would fail open, so writing an allowlist config via a
-heredoc stays blocked; use Write/Edit for it. Its error message says so.
+It was a fail-open, and the shape of it is the reason: the guard exists to stop
+a secret being written to disk, and the exemption handed any caller a set of
+four basenames that switched the guard off entirely. Writing a real credential
+to `.gitleaksignore` was never checked, and "the scanner would ignore it
+anyway" only holds while that file stays an allowlist — it is an ordinary file
+that can be renamed, copied, or committed to a repo whose scanner reads a
+different config. A guard that can be disarmed by choosing a filename is not a
+guard on the write; it is a guard on the writer's cooperation.
 
-The trade-off accepted: a real credential committed inside a file with one of
-those four basenames is not caught by this guard. Such a file is already an
-allowlist, so a scanner would ignore the value regardless.
+Both surfaces now behave the same way, which also removes the asymmetry that
+made the old behaviour hard to reason about: `write-secret-guard-bash.sh` never
+carried the exemption, because a command string only lets the real target be
+inferred, and inferred wrongly — `tee .gitleaks.toml other.env` writes both.
+
+If a scanner allowlist genuinely needs a secret-shaped literal, it is a fixture
+and belongs in `fixtures.allow`, where its diff is reviewable; see
+§ Sanctioned fixtures. Generate the value with `scripts/fixture-value.sh`
+rather than typing one.
 
 ## What this plugin does not do
 

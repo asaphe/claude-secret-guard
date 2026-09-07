@@ -107,7 +107,7 @@ PEM_HEADER=$(printf '%s\n' "$PEM_KEY" | head -1)
 if [ -n "$PEM_KEY" ] && [ -n "$PEM_HEADER" ]; then
   printf '\n%s\n%s\n' "$LISTED" "$PEM_HEADER" >> "$C/fixtures.allow"
   bash_write "$C" "printf '%s' $LISTED > /tmp/probe"
-  check "a PEM header entry is refused and announced" "no notice" grep -q 'ignoring the PEM header entry' "$WORK/err"
+  check "a PEM header entry is refused and announced" "no notice" grep -q 'ignoring the private-key header entry' "$WORK/err"
   # The property is that the header buys nothing, which only a real key can show: the notice alone would still print if the entry were honoured.
   tool_write "$C" "$PEM_KEY"
   expect_exit "listing the header does not exempt a real key" 2 "$?"
@@ -198,9 +198,34 @@ jq -nc '{tool_name:"MultiEdit", tool_input:{edits:[{new_string:"benign"}]}}' \
   | bash "$ROOT/scripts/write-secret-guard.sh" >/dev/null 2>&1
 expect_exit "control: a benign multi-edit still passes" 0 "$?"
 
+# --- a key split across adjacent edits: the newline join hides it, the empty join does not ---
+jq -nc --arg a "${FRESH:0:10}" --arg b "${FRESH:10}" \
+  '{tool_name:"MultiEdit", tool_input:{edits:[{new_string:$a},{new_string:$b}]}}' \
+  | bash "$ROOT/scripts/write-secret-guard.sh" >/dev/null 2>&1
+expect_exit "a key split across two edits is still blocked" 2 "$?"
+
+# --- NotebookEdit reaches disk exactly as Write does ---
+jq -nc --arg k "$FRESH" '{tool_name:"NotebookEdit", tool_input:{new_source:$k}}' \
+  | bash "$ROOT/scripts/write-secret-guard.sh" >/dev/null 2>&1
+expect_exit "NotebookEdit is scanned" 2 "$?"
+jq -nc '{tool_name:"NotebookEdit", tool_input:{new_source:"benign"}}' \
+  | bash "$ROOT/scripts/write-secret-guard.sh" >/dev/null 2>&1
+expect_exit "control: a benign NotebookEdit still passes" 0 "$?"
+check "NotebookEdit is wired in hooks.json" "matcher does not name it" grep -q 'NotebookEdit' "$ROOT/hooks/hooks.json"
+
 # --- and one shape definition, not three ---------------------------------------
 COPIES=$(grep -lE "^PATTERN=" "$ROOT"/scripts/*.sh 2>/dev/null | wc -l | tr -d ' ')
 check "no guard carries its own copy of the pattern" "$COPIES script(s) still define PATTERN" [ "$COPIES" = "0" ]
+
+# --- every generatable shape is detected end to end: the generator refuses a value the pattern misses, so a shape named without a working alternative fails here rather than passing silently ---
+for shape in aws-access-key slack-bot-token slack-user-token slack-app-token gitlab-pat gitlab-runner-token; do
+  V=$(bash "$ROOT/scripts/fixture-value.sh" "$shape" 2>/dev/null) || V=""
+  check "$shape generates a guarded value" "the generator refused it or emitted nothing" [ -n "$V" ]
+  [ -n "$V" ] || continue
+  jq -nc --arg k "$V" '{tool_name:"Write", tool_input:{content:$k, file_path:"/tmp/probe.txt"}}' \
+    | bash "$ROOT/scripts/write-secret-guard.sh" >/dev/null 2>&1
+  expect_exit "$shape is blocked on write" 2 "$?"
+done
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]
