@@ -141,8 +141,21 @@ fi
 sg_invoked_scripts() {
   printf '%s\n' "$1" | awk '
     function base(p,   a, n) { n = split(p, a, "/"); return a[n] }
+    # Whitespace inside a quoted run is not a word break, and a path spelled with one was silently skipped.
+    function protect(s,   out, i, c, q) {
+      out = ""; q = ""
+      for (i = 1; i <= length(s); i++) {
+        c = substr(s, i, 1)
+        if (q == "") { if (c == "\"" || c == "'"'"'") q = c }
+        else if (c == q) q = ""
+        else if (c == " " || c == "\t") c = SOH
+        out = out c
+      }
+      return out
+    }
+    BEGIN { SOH = sprintf("%c", 1) }
     {
-      s = $0
+      s = protect($0)
       gsub(/&&|\|\|/, ";", s)
       n = split(s, seg, /[;&|()\n]/)
       for (i = 1; i <= n; i++) {
@@ -165,9 +178,9 @@ sg_invoked_scripts() {
             if (w[j] == "-o" || w[j] == "-c") { skip = 1; continue }
             if (skip) { skip = 0; continue }
             if (w[j] ~ /^-/) continue
-            print w[j]; break
+            gsub(SOH, " ", w[j]); print w[j]; break
           }
-        } else if (w[k] ~ /^(\.\.?\/|\/|~\/)/) print w[k]
+        } else if (w[k] ~ /^(\.\.?\/|\/|~\/)/) { gsub(SOH, " ", w[k]); print w[k] }
       }
     }' 2>/dev/null | sort -u
 }
@@ -177,10 +190,15 @@ sg_resolve() {
   local _p="$1" _base="$2"
   _p=${_p//\"/}
   _p=${_p//\'/}
-  case "$_p" in \~/*) _p="$HOME/${_p#\~/}" ;; esac
-  _p=${_p//\$\{HOME\}/$HOME}
-  _p=${_p//\$HOME/$HOME}
-  _p=${_p//SG_BASEDIR/$_base}
+  # shellcheck disable=SC2016 # literal: these match the text "$HOME" as a script spells it, not its value
+  # Prefix forms, never a pattern replacement: bash 5.2 expands a bare & in the replacement to the matched text, and quoting it to stop that is taken literally by 3.2, so the same line resolves differently on each.
+  case "$_p" in
+    \~/*) _p="$HOME/${_p#\~/}" ;;
+    '${HOME}'/*) _p="$HOME/${_p#'${HOME}'/}" ;;
+    '$HOME'/*) _p="$HOME/${_p#'$HOME'/}" ;;
+    SG_BASEDIR/*) _p="$_base/${_p#SG_BASEDIR/}" ;;
+    SG_BASEDIR) _p="$_base" ;;
+  esac
   case "$_p" in
     /*) printf '%s' "$_p" ;;
     *) printf '%s/%s' "$_base" "$_p" ;;
@@ -199,8 +217,10 @@ sg_script_body() {
 SG_DEPTH=${SG_BODY_DEPTH:-0}
 # Command position, in bash and without a subprocess: this runs on every Bash call, and a command that starts no script has to cost nothing to clear.
 SG_INV='(^|[[:space:];&|(])([^[:space:];&|()]*/)?((ba|z|k|da)?sh|source)[[:space:]]|(^|[[:space:];&|(])\.[[:space:]]|(^|[;&|(]|&&|\|\|)[[:space:]]*(\.{1,2}/|/|~/)'
+# Newlines become separators for the gate test only: bash anchors =~ to the string rather than the line, so a direct-path run on line 2 matched nothing, and a literal newline cannot go in the pattern because grep -E reads one as a pattern separator and the bracket it sits in would split across two.
+SG_GATE=${CMD//$'\n'/;}
 # The invoked script, then what that script sources: deeper needs a case where a sourced file's own sourced file carries the fetch, and each level costs a scan of every candidate.
-if [ "$SG_DEPTH" -lt 2 ] && [[ $CMD =~ $SG_INV ]]; then
+if [ "$SG_DEPTH" -lt 2 ] && [[ $SG_GATE =~ $SG_INV ]]; then
   SG_BASE=${SG_BODY_BASE:-$(printf '%s' "$INPUT" | jq -r '.cwd // empty' 2>/dev/null)}
   [ -n "$SG_BASE" ] || SG_BASE=$PWD
   SG_TEXT=$CMD
@@ -224,7 +244,10 @@ if [ "$SG_DEPTH" -lt 2 ] && [[ $CMD =~ $SG_INV ]]; then
     # Kept: lines naming a guarded tool, and lines that invoke another script — without the second class the level below is never reached. One normalization for the whole file, because re-entering the guard on every line of a script costs a subprocess per line of it.
     SG_BODY=$(normalize_cmd "$SG_BODY" | grep -E "(^|[^[:alnum:]_-])(op|secretsmanager)([^[:alnum:]_-]|\$)|$SG_INV")
     [ -n "$SG_BODY" ] || continue
-    SG_PAYLOAD=$(jq -nc --arg c "$SG_BODY" '{tool_input:{command:$c}}' 2>/dev/null) || continue
+    if ! SG_PAYLOAD=$(jq -nc --arg c "$SG_BODY" '{tool_input:{command:$c}}' 2>/dev/null); then
+      echo "SECRET-MASK GUARD: $SG_FILE names a guarded tool but its contents could not be handed to the checker — jq failed. Blocking: the guard cannot confirm this script is free of a raw secret read." >&2
+      exit 2
+    fi
     # Re-entered rather than re-implemented: a second copy of the predicates is what lets a widening reach the command line and not the file, the same argument that put the shape pattern in one place.
     SG_WHY=$(printf '%s' "$SG_PAYLOAD" | SG_BODY_DEPTH=$((SG_DEPTH + 1)) SG_BODY_BASE="$SG_DIR" bash "${BASH_SOURCE[0]}" 2>&1 >/dev/null)
     SG_RC=$?

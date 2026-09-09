@@ -309,6 +309,17 @@ run BLOCK "behind sudo and an assignment"     "FOO=1 sudo bash $SGD/fetch.sh"
 run BLOCK "in the command's second segment"   "cd /tmp && bash $SGD/fetch.sh"
 run BLOCK "past a flag taking an operand"     "bash -o pipefail $SGD/fetch.sh"
 run BLOCK "past a cluster of flags"           "bash -eu $SGD/fetch.sh"
+# bash anchors =~ to the string, not the line, so the gate saw only line 1 of a multi-line command.
+run BLOCK "multi-line, direct path"           "$(printf 'echo hi\n%s/fetch.sh' "$SGD")"
+# A cd inside the command is not followed: paths resolve against the payload cwd, so this is a skip, not a miss.
+run ALLOW "multi-line, cd then relative"      "$(printf 'cd %s\n./fetch.sh' "$SGD")"
+# The extractor split on whitespace with no quote awareness, so a path spelled with a space was skipped.
+mkdir -p "$SGD/my dir" && cp "$SGD/fetch.sh" "$SGD/my dir/fetch.sh"
+run BLOCK "quoted path holding a space"       "bash \"$SGD/my dir/fetch.sh\""
+# A path holding a shell separator is skipped: the extractor splits segments on ;&|() with no quote
+# state, so the candidate is truncated. Pinned as a known skip so the fail-open stays visible.
+mkdir -p "$SGD/a&b" && cp "$SGD/fetch.sh" "$SGD/a&b/fetch.sh"
+run ALLOW "known skip: & in the path"         "bash \"$SGD/a&b/fetch.sh\""
 
 # --- naming a script is not running it, and a mention inside one is not a fetch ---
 run ALLOW "a script that only mentions it"    "bash $SGD/prose.sh"
