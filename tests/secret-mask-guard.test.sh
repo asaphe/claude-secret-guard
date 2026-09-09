@@ -309,6 +309,20 @@ run BLOCK "behind sudo and an assignment"     "FOO=1 sudo bash $SGD/fetch.sh"
 run BLOCK "in the command's second segment"   "cd /tmp && bash $SGD/fetch.sh"
 run BLOCK "past a flag taking an operand"     "bash -o pipefail $SGD/fetch.sh"
 run BLOCK "past a cluster of flags"           "bash -eu $SGD/fetch.sh"
+# The interpreter's own operand flags, which decide whether the next word is the script at all.
+# A cluster is decided by its last letter: -euo takes pipefail, so the script is the word after it.
+run BLOCK "a cluster ending in -o"            "bash -euo pipefail $SGD/fetch.sh"
+run BLOCK "a cluster ending in -c"            "sh -ec true $SGD/fetch.sh"
+# An operand attached to the letter carries its own, so the next word is already the script.
+run BLOCK "an attached interpreter operand"   "bash -opipefail $SGD/fetch.sh"
+# Long forms take a separate operand too, and only these two do.
+run BLOCK "past --rcfile and its operand"     "bash --rcfile /dev/null $SGD/fetch.sh"
+run BLOCK "past --init-file and its operand"  "bash --init-file /dev/null $SGD/fetch.sh"
+run BLOCK "a long flag taking no operand"     "bash --norc $SGD/fetch.sh"
+run BLOCK "another long flag with no operand" "bash --posix $SGD/fetch.sh"
+# -n parses the file without running any of it, so there is nothing to reach the transcript.
+run ALLOW "the interpreter is not executing"  "bash -n $SGD/fetch.sh"
+run ALLOW "-n inside a cluster"               "bash -en $SGD/fetch.sh"
 # A flag on a transparent prefix does not change which word is the command; the operand-taking ones have to take their operand with them.
 run BLOCK "a flag on sudo"                    "sudo -E bash $SGD/fetch.sh"
 run BLOCK "sudo past an operand-taking flag"  "sudo -u root bash $SGD/fetch.sh"

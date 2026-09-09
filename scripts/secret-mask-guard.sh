@@ -199,12 +199,23 @@ sg_invoked_scripts() {
           skip = 0
           for (j = k + 1; j <= nf; j++) {
             if (w[j] == "") continue
-            # -n parses without running, so nothing in the file executes.
-            if (w[j] ~ /^-[A-Za-z]*n/) break
-            # -o and -c take a separate operand, which is a setting or a command, never the script.
-            if (w[j] == "-o" || w[j] == "-c") { skip = 1; continue }
             if (skip) { skip = 0; continue }
-            if (w[j] ~ /^-/) continue
+            if (w[j] ~ /^--/) {
+              # Only these two long forms take a separate operand; every other one is a switch, and an =-joined operand carries its own.
+              if (w[j] ~ /^--(rcfile|init-file)$/) skip = 1
+              continue
+            }
+            if (w[j] ~ /^-/) {
+              # getopt over the cluster, not an exact-token test: -n parses the file without running any of it, while o and c take an operand — the rest of the token when there is one, else the next word, so -euo takes pipefail and the script is the word after it.
+              obody = substr(w[j], 2); noexec = 0
+              for (oi = 1; oi <= length(obody); oi++) {
+                och = substr(obody, oi, 1)
+                if (och == "n") { noexec = 1; break }
+                if (och == "o" || och == "c") { if (oi == length(obody)) skip = 1; break }
+              }
+              if (noexec) break
+              continue
+            }
             gsub(SOH, " ", w[j]); print w[j]; break
           }
         } else if (w[k] ~ /^(\.\.?\/|\/|~\/)/) { gsub(SOH, " ", w[k]); print w[k] }
