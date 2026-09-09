@@ -8,8 +8,8 @@ session_namespace() {
     return 0
   fi
   local started stamp
-  started=$(ps -p "$PPID" -o lstart= 2>/dev/null | tr -d ' \t')
   # Degrades to uid+pid rather than failing: without ps this is exactly the old behaviour plus the uid, and a wrapper that refuses to run because ps is missing is a worse outcome than a narrower namespace.
+  started=$(ps -p "$PPID" -o lstart= 2>/dev/null | tr -d ' \t')
   # Each fallback is gated on the previous producing nothing, not on the binary existing: sha256sum is coreutils and shasum is perl, and one present but failing would otherwise leave the stamp empty and silently drop the start-time component this exists for.
   stamp=$(printf '%s' "$started" | sha256sum 2>/dev/null | awk '{print substr($1, 1, 12)}')
   [ -n "$stamp" ] || stamp=$(printf '%s' "$started" | shasum -a 256 2>/dev/null | awk '{print substr($1, 1, 12)}')

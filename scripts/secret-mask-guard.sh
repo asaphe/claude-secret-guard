@@ -160,8 +160,7 @@ sg_invoked_scripts() {
       n = split(s, seg, /[;&|()\n]/)
       for (i = 1; i <= n; i++) {
         c = seg[i]
-        # None of these change which word is the command being run. A flag on one does not either, but an
-        # operand-taking flag has to take its operand with it or the operand reads as the command.
+        # None of these change which word is the command being run, and neither does a flag on one, but an operand-taking flag has to take its operand with it or the operand reads as the command.
         while (match(c, /^[[:space:]]*([A-Za-z_][A-Za-z0-9_]*=[^[:space:]]*|sudo|env|exec|time|nohup)([[:space:]]+|$)/)) {
           p = substr(c, RSTART, RLENGTH); gsub(/[[:space:]]/, "", p)
           c = substr(c, RSTART + RLENGTH)
