@@ -189,7 +189,8 @@ sg_resolve() {
 
 # A full-line comment is prose about a command, not a command — the same distinction the predicates above already draw for a command that only describes a guarded read.
 sg_script_body() {
-  [ -f "$1" ] && [ -r "$1" ] || return 1
+  [ -f "$1" ] || return 1
+  [ -r "$1" ] || return 1
   [ "$(wc -c <"$1" 2>/dev/null || echo 0)" -le 262144 ] || return 1
   # -I yields nothing for a binary rather than reading it as text, and a binary is not a script.
   grep -Iv '^[[:space:]]*#' "$1" 2>/dev/null
@@ -214,7 +215,8 @@ if [ "$SG_DEPTH" -lt 2 ] && [[ $CMD =~ $SG_INV ]]; then
   while [ -n "$SG_OWN" ] && IFS= read -r SG_TOK; do
     [ -n "$SG_TOK" ] || continue
     SG_FILE=$(sg_resolve "$SG_TOK" "$SG_BASE")
-    [ -f "$SG_FILE" ] && [ -r "$SG_FILE" ] || continue
+    [ -f "$SG_FILE" ] || continue
+    [ -r "$SG_FILE" ] || continue
     SG_DIR=$(cd "$(dirname "$SG_FILE")" 2>/dev/null && pwd -P) || continue
     case "$SG_DIR" in "$SG_OWN" | "$SG_OWN"/*) continue ;; esac
     SG_BODY=$(sg_script_body "$SG_FILE") || continue
