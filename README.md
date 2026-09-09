@@ -140,7 +140,11 @@ What counts as an invoked script:
 - **Command position only.** A path that is merely an argument — `cat x.sh`,
   `grep -n foo x.sh` — is data, and scanning arguments is the false-positive
   class these predicates already refuse. A leading assignment, `sudo`, `env`,
-  `exec`, `time` or `nohup` does not change which word is the command.
+  `exec`, `time` or `nohup` does not change which word is the command, and
+  neither does a flag on one — but a flag that takes an operand (`sudo -u
+  root`, `env -u FOO`, `exec -a name`) has to carry the operand with it, or
+  the operand itself reads as the command. An operand attached to its flag
+  (`sudo -uroot`) carries its own, so the next word is still the command.
 - Not under `-n`, which parses the file without running any of it.
 - Two levels: the invoked script, and what that script sources.
 
@@ -352,8 +356,10 @@ unrelated shells could land on one cache path, where a stale hit serves a
 value that has since rotated. The fallback is now
 `uid<uid>-pid<pid>-<hash of the parent's start time>`, so a reissued PID
 resolves to a different namespace and two users on a shared `/tmp` never
-share a path at all. Without `ps` it degrades to uid plus PID rather than
-refusing to run.
+share a path at all. With neither `sha256sum` nor `shasum` usable the start
+time is carried whole rather than hashed, since dropping the component
+would reinstate the PID collision it exists to prevent. Without `ps` it
+degrades to uid plus PID rather than refusing to run.
 
 The tracker's session-less name was previously the fixed string `shared`,
 identical for every user on the machine. Combined with the ownership check

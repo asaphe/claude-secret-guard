@@ -86,5 +86,31 @@ case "$NOPS" in
   *) bad "an unavailable ps degrades to uid+pid instead of failing" "got '$NOPS'" ;;
 esac
 
+# Neither hasher present: the start-time component must still be there, or a recycled PID silently shares a namespace again.
+stub_ps 'Mon Sep  9 10:00:00 2026'
+printf '#!/usr/bin/env bash\nexit 127\n' > "$WORK/bin/sha256sum"
+printf '#!/usr/bin/env bash\nexit 127\n' > "$WORK/bin/shasum"
+chmod +x "$WORK/bin/sha256sum" "$WORK/bin/shasum"
+NOHASH=$(PATH="$WORK/bin:$PATH" env -u CLAUDE_CODE_SESSION_ID \
+  bash -c "source '$ROOT/scripts/session-namespace.sh'; session_namespace" 2>/dev/null)
+case "$NOHASH" in
+  *"-pid"*"-"?*) ok "no hasher still yields a start-time component" ;;
+  *) bad "no hasher still yields a start-time component" "got '$NOHASH'" ;;
+esac
+
+# Presence is not the property: the months whose stripped spelling shares a final letter (Jan/Jun) collided while the fallback kept only the last 12 bytes, which is the collision the stamp exists to prevent.
+stub_ps 'Wed Jan  9 10:00:00 2026'; cp "$WORK/bin/ps" "$WORK/ps-jan"
+stub_ps 'Fri Jun  9 10:00:00 2026'; cp "$WORK/bin/ps" "$WORK/ps-jun"
+# shellcheck disable=SC2016  # expanded by the inner shell: one process, two ps answers, neither hasher available
+NOHASH_PAIR=$(PATH="$WORK/bin:$PATH" env -u CLAUDE_CODE_SESSION_ID \
+  NS_LIB="$ROOT/scripts/session-namespace.sh" PS_STUB="$WORK/bin/ps" \
+  PS_EARLY="$WORK/ps-jan" PS_LATE="$WORK/ps-jun" \
+  bash -c 'source "$NS_LIB"; cp "$PS_EARLY" "$PS_STUB"; FIRST=$(session_namespace); cp "$PS_LATE" "$PS_STUB"; printf "%s %s" "$FIRST" "$(session_namespace)"')
+if [ "${NOHASH_PAIR% *}" != "${NOHASH_PAIR#* }" ]; then
+  ok "no hasher still separates two start times"
+else
+  bad "no hasher still separates two start times" "both resolved to '${NOHASH_PAIR% *}'"
+fi
+
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

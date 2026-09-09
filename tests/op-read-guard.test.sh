@@ -51,7 +51,9 @@ run ALLOW "same op:// uri, different account"        "op read --account $A op://
 run ALLOW "unrelated command is ignored"             "git status"
 run ALLOW "word merely containing op is ignored"     "stop reading the file"
 
-run ALLOW "malformed json fails open"                ""
+# The helper always emits valid JSON, so this is the no-op-read branch; the malformed-payload
+# fail-closed path is covered for every guard in fixtures.test.sh.
+run ALLOW "an empty command is ignored"              ""
 run ALLOW "op item get with no item fails open"      "op item get --format json"
 run ALLOW "unbalanced quote fails open"              "op item get $I --fields 'unclosed"
 

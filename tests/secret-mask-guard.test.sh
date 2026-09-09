@@ -309,6 +309,46 @@ run BLOCK "behind sudo and an assignment"     "FOO=1 sudo bash $SGD/fetch.sh"
 run BLOCK "in the command's second segment"   "cd /tmp && bash $SGD/fetch.sh"
 run BLOCK "past a flag taking an operand"     "bash -o pipefail $SGD/fetch.sh"
 run BLOCK "past a cluster of flags"           "bash -eu $SGD/fetch.sh"
+# The interpreter's own operand flags, which decide whether the next word is the script at all.
+# A cluster is decided by its last letter: -euo takes pipefail, so the script is the word after it.
+run BLOCK "a cluster ending in -o"            "bash -euo pipefail $SGD/fetch.sh"
+run BLOCK "a cluster ending in -c"            "sh -ec true $SGD/fetch.sh"
+# An operand attached to the letter carries its own, so the next word is already the script.
+run BLOCK "an attached interpreter operand"   "bash -opipefail $SGD/fetch.sh"
+# Long forms take a separate operand too, and only these two do.
+run BLOCK "past --rcfile and its operand"     "bash --rcfile /dev/null $SGD/fetch.sh"
+run BLOCK "past --init-file and its operand"  "bash --init-file /dev/null $SGD/fetch.sh"
+run BLOCK "a long flag taking no operand"     "bash --norc $SGD/fetch.sh"
+run BLOCK "another long flag with no operand" "bash --posix $SGD/fetch.sh"
+# -n parses the file without running any of it, so there is nothing to reach the transcript.
+run ALLOW "the interpreter is not executing"  "bash -n $SGD/fetch.sh"
+run ALLOW "-n inside a cluster"               "bash -en $SGD/fetch.sh"
+# A flag on a transparent prefix does not change which word is the command; the operand-taking ones have to take their operand with them.
+run BLOCK "a flag on sudo"                    "sudo -E bash $SGD/fetch.sh"
+run BLOCK "sudo past an operand-taking flag"  "sudo -u root bash $SGD/fetch.sh"
+run BLOCK "a flag on env"                     "env -i bash $SGD/fetch.sh"
+run BLOCK "a flag on time taking no operand"  "time -p bash $SGD/fetch.sh"
+run BLOCK "a direct path behind sudo"         "sudo $SGD/fetch.sh"
+run BLOCK "a direct path behind an assignment" "FOO=1 $SGD/fetch.sh"
+run BLOCK "a direct path behind exec"         "exec $SGD/fetch.sh"
+# Consuming a flag operand must not swallow the real command word: here the path is an argument to echo, not an invocation.
+run ALLOW "a script path argued behind sudo"  "sudo -u root echo $SGD/fetch.sh"
+# The gate has to model a flag's operand too, or a direct path behind one never reaches the extractor that resolves it.
+run BLOCK "a direct path behind an operand flag" "sudo -u root $SGD/fetch.sh"
+run BLOCK "a direct path behind env -u"       "env -u FOO $SGD/fetch.sh"
+run BLOCK "a direct path behind exec -a"      "exec -a nm $SGD/fetch.sh"
+# Only the last flag of a cluster takes the operand, and sudo has more operand flags than the short list first covered.
+run BLOCK "a clustered flag before the operand" "sudo -Eu root bash $SGD/fetch.sh"
+run BLOCK "sudo -T taking a timeout"          "sudo -T 30 bash $SGD/fetch.sh"
+run BLOCK "sudo --chroot taking a directory"  "sudo --chroot /tmp bash $SGD/fetch.sh"
+# An attached operand carries its own value, so the next word is still the command: -uroot must not eat the script the way -u root eats its username.
+run BLOCK "an attached operand before a path"  "sudo -uroot $SGD/fetch.sh"
+run BLOCK "an attached operand before bash"    "sudo -uroot bash $SGD/fetch.sh"
+run BLOCK "env with an attached operand"       "env -uFOO $SGD/fetch.sh"
+run BLOCK "a cluster whose operand is separate" "sudo -Eu root bash $SGD/fetch.sh"
+# Widening the gate must not pull ordinary prefixed commands into the scan.
+run ALLOW "sudo running a reader"             "sudo cat /etc/hosts"
+run ALLOW "a tool whose flag takes a path"    "make -C /repo build"
 # bash anchors =~ to the string, not the line, so the gate saw only line 1 of a multi-line command.
 run BLOCK "multi-line, direct path"           "$(printf 'echo hi\n%s/fetch.sh' "$SGD")"
 # A cd inside the command is not followed: paths resolve against the payload cwd, so this is a skip, not a miss.

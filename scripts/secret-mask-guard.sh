@@ -160,9 +160,35 @@ sg_invoked_scripts() {
       n = split(s, seg, /[;&|()\n]/)
       for (i = 1; i <= n; i++) {
         c = seg[i]
-        # None of these change which word is the command being run.
-        while (match(c, /^[[:space:]]*([A-Za-z_][A-Za-z0-9_]*=[^[:space:]]*|sudo|env|exec|time|nohup)([[:space:]]+|$)/))
+        # None of these change which word is the command being run, and neither does a flag on one, but an operand-taking flag has to take its operand with it or the operand reads as the command.
+        while (match(c, /^[[:space:]]*([A-Za-z_][A-Za-z0-9_]*=[^[:space:]]*|sudo|env|exec|time|nohup)([[:space:]]+|$)/)) {
+          p = substr(c, RSTART, RLENGTH); gsub(/[[:space:]]/, "", p)
           c = substr(c, RSTART + RLENGTH)
+          while (match(c, /^[[:space:]]*(--[A-Za-z0-9-]+=[^[:space:]]*|-[-A-Za-z0-9]+)([[:space:]]+|$)/)) {
+            f = substr(c, RSTART, RLENGTH); gsub(/[[:space:]]/, "", f)
+            c = substr(c, RSTART + RLENGTH)
+            if (f ~ /=/) continue
+            need = 0
+            if (f ~ /^--/) {
+              if ((p == "sudo" && f ~ /^--(user|group|prompt|host|role|type|chdir|close-from|chroot|command-timeout|login-class|other-user)$/) ||
+                  (p == "env"  && f ~ /^--(unset|chdir|split-string)$/) ||
+                  (p == "time" && f ~ /^--(format|output)$/)) need = 1
+            } else {
+              # getopt: the first operand-taking letter takes the rest of the token when there is one, so -uroot carries its own operand and the next word is still the command.
+              body = substr(f, 2)
+              for (ci = 1; ci <= length(body); ci++) {
+                ch = substr(body, ci, 1)
+                if ((p == "sudo" && index("ughprtcCUDRT", ch)) || (p == "env" && index("uCS", ch)) ||
+                    (p == "time" && index("fo", ch)) || (p == "exec" && index("a", ch))) {
+                  if (ci == length(body)) need = 1
+                  break
+                }
+              }
+            }
+            if (need)
+              sub(/^[[:space:]]*[^[:space:]]+([[:space:]]+|$)/, "", c)
+          }
+        }
         nf = split(c, w, /[[:space:]]+/)
         k = 0
         for (j = 1; j <= nf; j++) if (w[j] != "") { k = j; break }
@@ -172,12 +198,23 @@ sg_invoked_scripts() {
           skip = 0
           for (j = k + 1; j <= nf; j++) {
             if (w[j] == "") continue
-            # -n parses without running, so nothing in the file executes.
-            if (w[j] ~ /^-[A-Za-z]*n/) break
-            # -o and -c take a separate operand, which is a setting or a command, never the script.
-            if (w[j] == "-o" || w[j] == "-c") { skip = 1; continue }
             if (skip) { skip = 0; continue }
-            if (w[j] ~ /^-/) continue
+            if (w[j] ~ /^--/) {
+              # Only these two long forms take a separate operand; every other one is a switch, and an =-joined operand carries its own.
+              if (w[j] ~ /^--(rcfile|init-file)$/) skip = 1
+              continue
+            }
+            if (w[j] ~ /^-/) {
+              # getopt over the cluster, not an exact-token test: -n parses the file without running any of it, while o and c take an operand — the rest of the token when there is one, else the next word, so -euo takes pipefail and the script is the word after it.
+              obody = substr(w[j], 2); noexec = 0
+              for (oi = 1; oi <= length(obody); oi++) {
+                och = substr(obody, oi, 1)
+                if (och == "n") { noexec = 1; break }
+                if (och == "o" || och == "c") { if (oi == length(obody)) skip = 1; break }
+              }
+              if (noexec) break
+              continue
+            }
             gsub(SOH, " ", w[j]); print w[j]; break
           }
         } else if (w[k] ~ /^(\.\.?\/|\/|~\/)/) { gsub(SOH, " ", w[k]); print w[k] }
@@ -216,7 +253,8 @@ sg_script_body() {
 
 SG_DEPTH=${SG_BODY_DEPTH:-0}
 # Command position, in bash and without a subprocess: this runs on every Bash call, and a command that starts no script has to cost nothing to clear.
-SG_INV='(^|[[:space:];&|(])([^[:space:];&|()]*/)?((ba|z|k|da)?sh|source)[[:space:]]|(^|[[:space:];&|(])\.[[:space:]]|(^|[;&|(]|&&|\|\|)[[:space:]]*(\.{1,2}/|/|~/)'
+SG_PFX='([A-Za-z_][A-Za-z0-9_]*=[^[:space:]]*|sudo|env|exec|time|nohup|-[^[:space:]]*([[:space:]]+[^-[:space:]][^[:space:]]*)?)[[:space:]]+'
+SG_INV='(^|[[:space:];&|(])([^[:space:];&|()]*/)?((ba|z|k|da)?sh|source)[[:space:]]|(^|[[:space:];&|(])\.[[:space:]]|(^|[;&|(]|&&|\|\|)[[:space:]]*('"$SG_PFX"')*(\.{1,2}/|/|~/)'
 # Newlines become separators for the gate test only: bash anchors =~ to the string rather than the line, so a direct-path run on line 2 matched nothing, and a literal newline cannot go in the pattern because grep -E reads one as a pattern separator and the bracket it sits in would split across two.
 SG_GATE=${CMD//$'\n'/;}
 # The invoked script, then what that script sources: deeper needs a case where a sourced file's own sourced file carries the fetch, and each level costs a scan of every candidate.
