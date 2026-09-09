@@ -121,6 +121,57 @@ clear was text that merely *named* the path — a trailing
 reason `op read` is no longer conditioned on the absence of `op item get`: one
 command can carry both, and the raw read still needs blocking.
 
+## Fetches inside an invoked script
+
+Every predicate above reads the command line. A command that runs a script —
+`bash deploy.sh`, `source env.sh`, `./provision.sh` — puts the fetch one file
+away, where none of them can see it, and the value still reaches the transcript
+the moment the script runs.
+
+So a command in that shape is followed into the file, and the guard re-enters
+itself on the contents. Re-entering rather than re-implementing is the point:
+the file is held to exactly the predicates above, not to a second copy of them
+that a later widening would reach only one of.
+
+What counts as an invoked script:
+
+- The operand of `sh`/`bash`/`zsh`/`ksh`/`dash`, `source` or `.`, and a path
+  executed directly (`./x.sh`, `/opt/x.sh`, `~/x.sh`).
+- **Command position only.** A path that is merely an argument — `cat x.sh`,
+  `grep -n foo x.sh` — is data, and scanning arguments is the false-positive
+  class these predicates already refuse. A leading assignment, `sudo`, `env`,
+  `exec`, `time` or `nohup` does not change which word is the command.
+- Not under `-n`, which parses the file without running any of it.
+- Two levels: the invoked script, and what that script sources.
+
+Reading the file drops full-line comments — prose about a command is not a
+command, the same distinction drawn for a command that only *describes* a
+guarded fetch — and then keeps the lines that name `op` or `secretsmanager` at
+all, plus the lines that invoke a further script, over one normalization of the
+whole file. Without that narrowing, re-entry costs a subprocess per line of the
+script. A command that starts no script at all is cleared in the shell, with no
+subprocess spawned, because this runs on every Bash call.
+
+A path the guard cannot resolve without running something is skipped rather
+than guessed at. `~`, `$HOME`, and a path built from the script's own directory
+(`$(dirname "$0")`, `${BASH_SOURCE[0]%/*}`) resolve; anything assembled from
+another expansion does not. A relative path resolves against the payload's
+`cwd`.
+
+### Why this plugin's own tree is exempt
+
+A candidate resolving inside this plugin's own directory is skipped. The masked
+wrappers perform the fetch on purpose and mask what they print, so scanning
+them would block the exact call the guard's own message tells you to make; the
+tests carry guarded command text as data for the same reason the fixtures do.
+
+The exemption is a comparison of resolved paths, never a match on the text, so
+it cannot be claimed by naming one of these files — the wrapper-path exemption
+that was removed from the command predicates was removed precisely because a
+trailing `# see scripts/op-cache.sh` could claim it. Copy a wrapper out of the
+tree and it blocks, which is what keeps this an exemption for these files
+rather than for their contents.
+
 ## Flag masking and filenames
 
 Masking a flag value is right for the mask guard, where the value is
@@ -451,6 +502,14 @@ rather than typing one.
 - On the AWS side only Secrets Manager carries a predicate.
   `aws ssm get-parameter --with-decryption`, `aws kms decrypt` and
   `aws sts get-session-token` all print a plaintext value and none is matched.
+- A script is followed two levels deep — the one invoked and what it sources.
+  A fetch a third file away is not reached, and only shell interpreters are
+  followed: `python3 fetch.py` is not opened, so a fetch shelled out from
+  another language is not seen.
+- Inside an invoked script the scan is textual. A fetch behind a condition that
+  would never be taken still blocks, because nothing here runs the file to find
+  out, and a fetch in a file this plugin's own tree contains is not scanned at
+  all.
 - The reader list in the ask gate is closed — `cat`, `head`, `tail`, `less`,
   `more`, `grep`. A file read by any other program does not reach the basename
   patterns.
