@@ -288,5 +288,59 @@ run_without perl ALLOW "perl unavailable, benign command" "ls -la"
 run_without perl ALLOW "perl unavailable, git status"     "git status"
 run_without perl ALLOW "perl unavailable, an echo"        "echo hi"
 
+# --- a fetch inside a script the command runs ---
+# Built at run time, not committed: the body has to be a real fetch, which a committed file would not be allowed to carry.
+SGD=$(mktemp -d)
+# shellcheck disable=SC2016 # literal, unexpanded: the substitution has to reach the generated script
+printf '#!/usr/bin/env bash\nTOKEN=$(op %s %s)\n' "$R" "$U" >"$SGD/fetch.sh"
+printf '#!/usr/bin/env bash\naws %s get-secret-value --secret-id prod/app/db\n' "$SM" >"$SGD/sm.sh"
+# shellcheck disable=SC2016 # literal, unexpanded: the sibling path has to be resolved by the guard, not here
+printf '#!/usr/bin/env bash\nsource "$(dirname "${BASH_SOURCE[0]}")/fetch.sh"\n' >"$SGD/wrapper.sh"
+printf '#!/usr/bin/env bash\n# never call op %s directly, use the masked wrapper\necho "use the wrapper" >&2\n' "$R" >"$SGD/prose.sh"
+printf '#!/usr/bin/env bash\naws %s describe-secret --secret-id prod/app/db\n' "$SM" >"$SGD/clean.sh"
+
+run BLOCK "bash a script that fetches"        "bash $SGD/fetch.sh"
+run BLOCK "an aws fetch inside the script"    "bash $SGD/sm.sh"
+run BLOCK "source a script that fetches"      "source $SGD/fetch.sh"
+run BLOCK "dot-source a script that fetches"  ". $SGD/fetch.sh"
+run BLOCK "the script run by its own path"    "$SGD/fetch.sh"
+run BLOCK "a wrapper that sources the fetch"  "bash $SGD/wrapper.sh"
+run BLOCK "behind sudo and an assignment"     "FOO=1 sudo bash $SGD/fetch.sh"
+run BLOCK "in the command's second segment"   "cd /tmp && bash $SGD/fetch.sh"
+run BLOCK "past a flag taking an operand"     "bash -o pipefail $SGD/fetch.sh"
+run BLOCK "past a cluster of flags"           "bash -eu $SGD/fetch.sh"
+
+# --- naming a script is not running it, and a mention inside one is not a fetch ---
+run ALLOW "a script that only mentions it"    "bash $SGD/prose.sh"
+run ALLOW "a sibling verb that reveals none"  "bash $SGD/clean.sh"
+run ALLOW "the path in argument position"     "cat $SGD/fetch.sh"
+run ALLOW "grep over the fetching script"     "grep -n export $SGD/fetch.sh"
+run ALLOW "-n parses without running it"      "bash -n $SGD/fetch.sh"
+run ALLOW "a binary is not a script"          "/bin/ls -la"
+run ALLOW "a path that does not resolve"      "bash $SGD/no-such-file.sh"
+run ALLOW "a path built from an expansion"    "bash \$SOME_DIR/fetch.sh"
+
+# --- every predicate has to survive the narrowing the body scan applies before re-entry ---
+printf '#!/usr/bin/env bash\nop %s X --reveal\n' "$IG" >"$SGD/reveal.sh"
+printf '#!/usr/bin/env bash\nop run --no-masking -- ./deploy\n' >"$SGD/nomask.sh"
+printf '#!/usr/bin/env bash\nop %s server-key\n' "$DG" >"$SGD/docget.sh"
+printf '#!/usr/bin/env bash\naws %s batch-get-secret-value --filters Key=name,Values=prod/\n' "$SM" >"$SGD/batch.sh"
+run BLOCK "body: item get --reveal"           "bash $SGD/reveal.sh"
+run BLOCK "body: run --no-masking"            "bash $SGD/nomask.sh"
+run BLOCK "body: document get to stdout"      "bash $SGD/docget.sh"
+run BLOCK "body: batch-get-secret-value"      "bash $SGD/batch.sh"
+
+# --- this plugin's own tree is exempt, and by resolved path rather than by content ---
+# The wrappers really do perform the fetch, so a copy of one outside the tree must block: that is what tells the exemption apart from the scan simply not seeing them.
+run ALLOW "the wrapper invoked from its tree" "bash $(dirname "$0")/../scripts/op-cache.sh --mask $U"
+run ALLOW "the guard's own tests invoked"     "bash $(dirname "$0")/secret-mask-guard.test.sh"
+cp "$(dirname "$0")/../scripts/op-cache.sh" "$SGD/copied-wrapper.sh"
+run BLOCK "the same wrapper copied outside"   "bash $SGD/copied-wrapper.sh"
+
+# An ordinary script carrying none of the guarded words must clear the scan untouched.
+cp "$(dirname "$0")/../scripts/strip-cmd.sh" "$SGD/ordinary.sh"
+run ALLOW "an ordinary script, outside"       "bash $SGD/ordinary.sh"
+rm -rf "$SGD"
+
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]
