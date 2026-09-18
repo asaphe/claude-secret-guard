@@ -58,5 +58,7 @@ add it to `fixtures.allow` in the same PR. See README § Sanctioned fixtures.
 
 ## Reporting a security issue
 
-If you find a secret shape this plugin fails to catch, or a case where a
-guard can be bypassed, please open an issue.
+If you find a case where a guard can be bypassed, report it privately as
+described in [SECURITY.md](SECURITY.md) rather than in a public issue. A
+secret shape the patterns do not cover yet is a feature request, so open an
+issue for that.
