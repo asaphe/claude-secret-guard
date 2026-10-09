@@ -89,7 +89,9 @@ operator (`python3 <<'EOF'`) or after it (`cat <<'EOF' | python3`) — or
 past it: a trailing `|` or `\` carries the opener onto the next line, and
 a heredoc inside a group goes wherever the group sends it, so the group's
 opener (`eval "$(`, `source <(`) and the closer that ends it after the body
-(`) | sh`) both count. The interpreter is recognised under the same
+(`) | sh`) both count. A trailing `\` joins lines on either side of the
+heredoc too (`bash \` above `<<'EOF'`, `) \` above `| sh`), and a `case`
+arm's `)` is a pattern, not a group closer. The interpreter is recognised under the same
 respellings the predicates normalize (`| "sh"`, `| \bash`). An ordinary
 destination on the same line (`cat <<'EOF' > file`, `| tee file`) leaves
 the body masked and is preserved as written.
@@ -539,7 +541,7 @@ rather than typing one.
   `more`, `grep`. A file read by any other program does not reach the basename
   patterns.
 - The interpreter list that keeps a heredoc body visible is closed — `sh`,
-  `bash`, `zsh`, `ksh`, `dash`, `csh`, `tcsh`, `mksh`, `fish`, `python`,
+  `bash`, `zsh`, `ksh`, `dash`, `ash`, `csh`, `tcsh`, `mksh`, `fish`, `python`,
   `perl`, `ruby`, `node`, `ssh`, `awk`, `xargs`, `env`, `eval`, and `source`
   or `.` of `/dev/stdin` or `<(…)` — and a group is found by counting
   parentheses and braces, not by parsing. A body handed to anything else
