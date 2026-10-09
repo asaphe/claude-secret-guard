@@ -210,6 +210,20 @@ splitting. Splitting on whitespace left quote characters attached, so
 falls back to a bare split with quotes removed, so the gate still asks
 rather than going silent.
 
+Text the shell runs as a command line is split the way the shell splits
+it. An unquoted `|`, `;` or `&` ends a word, so `cat secrets.pem|head`
+names `secrets.pem`. The operand of a shell's `-c`
+(`bash -c "cat secrets.pem | head -1"`, `bash -o pipefail -c …`), the
+operand of `eval`, and the body of a `$(…)` substitution — including one
+inside double quotes, such as `eval "$(cat <<'EOF' … EOF)"` — are split
+into their own words, at any depth. Every other quoted word stays whole:
+a `grep -E` alternation, a `jq -c` filter, a commit message, a string in a
+`python3 -` heredoc. Splitting every quoted word that held `|`, `;` or `&`
+was tried first and prompted on ordinary commands: `jq` filters with a
+`.key` segment, `grep` alternations of path globs, Markdown code spans in
+a heredoc. The `-c` counts only when a shell owns it, since `jq -c` is the
+far more common spelling.
+
 Globs are not expanded for the *verdict*, since the hook's working
 directory is not necessarily the one the command will run in, and a
 verdict that depends on it is not reproducible. An unresolved pattern is
@@ -524,21 +538,20 @@ rather than typing one.
 - The reader list in the ask gate is closed — `cat`, `head`, `tail`, `less`,
   `more`, `grep`. A file read by any other program does not reach the basename
   patterns.
-- The reader gate reads a quoted string as one word and matches the basename
-  patterns against the whole of it, so a key named inside a quoted command
-  line is seen only when it ends the string:
-  `bash -c "cat secrets.pem | head -1"`, and a heredoc body inside a
-  double-quoted substitution (`eval "$(cat <<'EOF' … EOF)"`,
-  `echo "$(cat <<'EOF' … EOF)" | sh`). The mask guard blocks a fetch in
-  either position.
 - The interpreter list that keeps a heredoc body visible is closed — `sh`,
   `bash`, `zsh`, `ksh`, `dash`, `csh`, `tcsh`, `mksh`, `fish`, `python`,
   `perl`, `ruby`, `node`, `ssh`, `awk`, `xargs`, `env`, `eval`, and `source`
   or `.` of `/dev/stdin` or `<(…)` — and a group is found by counting
-  parentheses and braces, not by
-  parsing. A body handed to anything else stays masked, as does one reached
-  through a function called later (`f() { cat <<'EOF' … }` then `f | sh`) or
-  through a group that an unbalanced quoted parenthesis hides.
+  parentheses and braces, not by parsing. A body handed to anything else
+  stays masked, as does one reached through a function called later
+  (`f() { cat <<'EOF' … }` then `f | sh`) or through a group that an
+  unbalanced quoted parenthesis hides.
+- The reader gate splits a `$(…)` substitution but not a backtick one, so
+  ``echo "`tail -c 64 server.key` done"`` is read as one word; Markdown code
+  spans in a `python3 -` heredoc use the same character and would prompt.
+  A `$(…)` written inside such a heredoc's strings is split as shell all the
+  same, and a shell's `-c` counts only when the shell is among the four words
+  before the `-c`.
 
 ## License
 

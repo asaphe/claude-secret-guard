@@ -97,7 +97,9 @@ run SILENT "heredoc body naming a file"       "$(printf 'cat <<EOF\n%s\nEOF' "$P
 
 # --- a heredoc body a shell runs is a command, however the shell reaches it ---
 NL=$'\n'
-# A body inside a double-quoted substitution (`eval "$(cat <<EOF …)"`) is kept but reaches this gate as one token; the mask guard suite covers it — see README § What this plugin does not do.
+run ASK    "eval of a heredoc substitution"      "eval \"\$(cat <<'EOF'${NL}cat $PEM${NL}EOF${NL})\""
+run ASK    "eval opened on the line above"       "eval \"\$(${NL}cat <<'EOF'${NL}cat $PEM${NL}EOF${NL})\""
+run ASK    "substitution echoed into sh"         "echo \"\$(cat <<'EOF'${NL}cat $PEM${NL}EOF${NL})\" | sh"
 run ASK    "source of a heredoc substitution"    "source <(cat <<'EOF'${NL}cat $PEM${NL}EOF${NL})"
 run ASK    "dot of a heredoc substitution"       ". <(cat <<'EOF'${NL}cat $PEM${NL}EOF${NL})"
 run ASK    "pipe carried past the body"          "cat <<'EOF' |${NL}cat $PEM${NL}EOF${NL}sh"
@@ -119,6 +121,29 @@ run SILENT "group redirected to a file"          "(cat <<'EOF'${NL}cat $PEM${NL}
 run SILENT "message substitution, then a shell"  "git commit -m \"\$(cat <<'EOF'${NL}cat $PEM${NL}EOF${NL})\" && bash deploy.sh"
 run SILENT "case arm after a data heredoc"       "cat <<'EOF' > f.txt${NL}cat $PEM${NL}EOF${NL}case x in a) bash y ;; esac"
 run SILENT "prose closer inside a later body"    "(cat <<'A' > a.md${NL}cat $PEM${NL}A${NL}cat <<'B' > b.md${NL}2) ssh in${NL}B${NL})"
+
+# --- a quoted word holding a command line is read word by word, not only by how it ends ---
+run ASK    "key mid-string in bash -c"           "bash -c \"cat $PEM | head -1\""
+run ASK    "key before a separator in sh -c"     "sh -c 'head -1 id_rsa; true'"
+run ASK    "key in a nested sh -c"               "bash -c \"sh -c 'cat $KEY notes.txt; true'\""
+run ASK    "key glued to a pipe"                 "cat $PEM|head -1"
+run ASK    "key glued to a semicolon"            "cat $PEM;true"
+run ASK    "glued pipe after a quoted apostrophe" "echo \"it's\"; cat $PEM|head -1"
+run ASK    "glued pipe after a quoted quote"     "echo 'say \"hi'; cat $PEM|head -1"
+run ASK    "key in a substitution before more"   "echo \"\$(cat $PEM | head -1)\""
+run ASK    "key on an earlier line of bash -c"   "bash -c \"cat $PEM${NL}echo done\""
+run ASK    "substitution with text after it"     "echo \"\$(tail -c 64 $KEY) done\""
+run ASK    "substitution inside an assignment"   "X=\"\$(cat $KEY) done\""
+run ASK    "eval of a quoted command line"       "eval \"cat $PEM | head -1\""
+run ASK    "shell options before the -c"         "bash -o pipefail -c \"cat $PEM | head -1\""
+run SILENT "escaped pipe stays in its word"      'cat README.md; grep x\|.env notes.md'
+# Quoted prose with no command punctuation stays one word, so only a key-shaped last word prompts — the documented -m trade-off.
+run SILENT "prose -m naming dotenv mid-string"   'cat README.md && git commit -m "rotate the .env loader"'
+run SILENT "prose -m naming a key mid-string"    "cat README.md && git commit -m \"move $PEM handling out\""
+# Quoted patterns are data even when they carry command punctuation; each of these shapes prompted on real commands while the split was any word holding |, ; or &.
+run SILENT "jq -c filter naming .key"            "cat x.json | jq -c '.[] | select(.key) | .value'"
+run SILENT "grep alternation of path globs"      "grep -nE '^python/\\*|^\\* ' CODEOWNERS"
+run SILENT "markdown code spans in a python body" "grep -c x f.md; python3 - <<'EOF'${NL}s = \"lanes: \`python/**\`, \`*.py\`\"${NL}EOF"
 
 # --- ordinary reads must stay silent -------------------------------------------
 run SILENT "plain markdown read"              "cat README.md"
