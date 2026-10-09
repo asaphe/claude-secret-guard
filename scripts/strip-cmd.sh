@@ -23,7 +23,7 @@ strip_cmd() {
     my $FLAG = $mode eq "long-flags-only" ? $LONG : qr/$LONG|-(?![A-Za-z]*c)[A-Za-z]*m/;
     # A heredoc piped into an interpreter is executed by it, whatever the delimiter quoting did in the parent shell; the path-qualified spelling runs the same interpreter.
     # The quotes are optional because the builtins execute `source "/dev/stdin"` exactly as they execute the bare spelling, and `source <(...)` runs whatever the substitution prints.
-    my $INTERP = qr{(?:^|[\s;&|(])(?:(?:[^\s;&|()<>]*/)?(?:(?:ba|z|k|da|c|tc|mk|fi)?sh|python[\d.]*|perl|ruby|node|ssh|awk|xargs|env|eval)(?:\s|$)|(?:source|\.)[ \t]+(?:["\x27]?/dev/(?:stdin|fd/\d+)|<\())};
+    my $INTERP = qr{(?:^|[\s;&|(])(?:(?:[^\s;&|()<>]*/)?(?:(?:ba|z|k|da|a|c|tc|mk|fi)?sh|python[\d.]*|perl|ruby|node|ssh|awk|xargs|env|eval)(?:\s|$)|(?:source|\.)[ \t]+(?:["\x27]?/dev/(?:stdin|fd/\d+)|<\())};
     # The interpreter is respelled like any verb (`| "sh"`, `\bash`), so it is looked for in the text normalize_cmd would produce.
     my $runs = sub {
       my $s = shift;
@@ -42,6 +42,22 @@ strip_cmd() {
     my $unbody = sub {
       my $s = shift;
       $s =~ s/(?<!<)<<-?[ \t]*(["\x27]?)\\?([A-Za-z_][A-Za-z0-9_]*)\1([^\n]*)\n.*?\n[ \t]*\2\b/ $3/gs;
+      return $s;
+    };
+    # A case arm ) closes a pattern, not a group, so it is blanked before the walk pairs parens, along with the optional ( that opens a pattern.
+    my $uncase = sub {
+      my $s = shift;
+      my ($open, $await, $want, @arm) = (0, 0, 0);
+      while ($s =~ /(?:^|[\n;&|({]|\b(?:then|do|else))[ \t]*\K(case)(?=[ \t])|\b(in|esac)\b|(;;&?|;&)|([()])/g) {
+        if (defined $1) { $open++; $await = 1 }
+        elsif (defined $2) {
+          if ($2 eq "in") { ($await, $want) = (0, 1) if $await }
+          elsif ($open) { $open--; $want = 0 }
+        }
+        elsif (defined $3) { $want = 1 if $open }
+        elsif ($want) { push @arm, $-[0]; $want = 0 if $4 eq ")" }
+      }
+      substr($s, $_, 1) = " " for @arm;
       return $s;
     };
 
@@ -81,11 +97,17 @@ strip_cmd() {
       my ($pre, $tail, $body, $all, $quoted, $post, $before) = @_;
       # A trailing backslash continues the opener line, so the line after it belongs to the command rather than to the body.
       while ($tail =~ /\\\z/ && $body =~ s/\A([^\n]*)(?:\n|\z)//) { $tail .= "\n$1" }
-      return $all if $runs->($owner->($pre));
+      # A backslash ending the line above joins it to the opener, so the command that owns the heredoc can start there.
+      my ($lead, $prev) = ($pre, $before);
+      while ($prev =~ s/([^\n]*)\\\n\z//) { $lead = "$1 $lead" }
+      return $all if $runs->($owner->($lead));
       # The rest of that line consumes the body too: `<<EOF | python3` feeds it to an interpreter exactly as a preceding command would.
       return $all if $runs->($carry->($tail, $post));
       # Inside a group the body goes wherever the group sends it, so each group still open at the heredoc is judged by its opener (`eval "$(`) and by the closer that ends it after the body (`) | sh`).
-      my ($above, $depth, $groups) = ($unbody->("$before$pre"), 0, 0);
+      # Both sides are uncased as one text, since a case opened above the heredoc has its later arms below it.
+      my $up = $unbody->("$before$pre");
+      my $both = $uncase->("$up " . $unbody->("$tail\n$post"));
+      my ($above, $below, $depth, $groups) = (substr($both, 0, length $up), substr($both, length($up) + 1), 0, 0);
       for (my $i = length($above) - 1; $i >= 0; $i--) {
         my $c = substr($above, $i, 1);
         if ($c eq ")" || $c eq "}") { $depth++ }
@@ -93,16 +115,17 @@ strip_cmd() {
           if ($depth) { $depth--; next }
           $groups++;
           my $from = rindex($above, "\n", $i) + 1;
+          $from = rindex($above, "\n", $from - 2) + 1 while $from > 1 && substr($above, $from - 2, 1) eq "\\";
           return $all if $runs->($owner->(substr($above, $from, $i + 1 - $from)));
         }
       }
-      my $below = $unbody->("$tail\n$post");
       $depth = 0;
       while ($groups && $below =~ /([(){}])/g) {
         if ($1 eq "(" || $1 eq "{") { $depth++; next }
         if ($depth) { $depth--; next }
         $groups--;
         my ($line, $rest) = substr($below, pos($below)) =~ /\A([^\n]*)(.*)\z/s;
+        while ($line =~ /\\\z/ && $rest =~ s/\A\n([^\n]*)//) { chop $line; $line .= " $1" }
         $line =~ s/(?:;|&&|\|\|).*//;
         return $all if $runs->($carry->($line, $rest));
       }

@@ -167,12 +167,22 @@ run BLOCK "pipe to csh"                      "cat <<'EOF' | csh${NL}op $R $U${NL
 run BLOCK "pipe to tcsh"                     "cat <<'EOF' | tcsh${NL}op $R $U${NL}EOF"
 run BLOCK "pipe to fish"                     "cat <<'EOF' | fish${NL}op $R $U${NL}EOF"
 run BLOCK "pipe to mksh"                     "cat <<'EOF' | mksh${NL}op $R $U${NL}EOF"
+run BLOCK "pipe to ash"                      "cat <<'EOF' | ash${NL}op $R $U${NL}EOF"
+run BLOCK "group closer continued by a backslash" "(cat <<'EOF'${NL}op $R $U${NL}EOF${NL}) \\${NL}| sh"
+run BLOCK "interpreter continued onto the heredoc" "bash \\${NL}<<'EOF'${NL}op $R $U${NL}EOF"
+run BLOCK "group opener continued by a backslash" "eval \\${NL}\"${SUB}cat <<'EOF'${NL}op $R $U${NL}EOF${NL})\""
+run BLOCK "continued opener on the line above" "eval \\${NL}\"${SUB}${NL}cat <<'EOF'${NL}op $R $U${NL}EOF${NL})\""
+run BLOCK "case arm before the group closer" "(cat <<'EOF'${NL}op $R $U${NL}EOF${NL}case x in a) true ;; esac${NL}) | sh"
+run BLOCK "parenthesized case arm before the closer" "(cat <<'EOF'${NL}op $R $U${NL}EOF${NL}case x in (a) true ;; esac${NL}) | sh"
+run BLOCK "heredoc inside a case arm in a group" "(case x in a) cat <<'EOF'${NL}op $R $U${NL}EOF${NL};; b) true ;; esac${NL}) | sh"
 # The same body stays masked where nothing runs it, or every commit message and runbook naming a fetch would block.
 run ALLOW "heredoc redirected to a file"     "cat <<'EOF' > f.txt${NL}op $R $U${NL}EOF"
 run ALLOW "heredoc piped to grep"            "cat <<'EOF' | grep x${NL}op $R $U${NL}EOF"
 run ALLOW "group redirected to a file"       "(cat <<'EOF'${NL}op $R $U${NL}EOF${NL}) > notes.txt"
 run ALLOW "message substitution, then a shell" "git commit -m \"${SUB}cat <<'EOF'${NL}op $R $U${NL}EOF${NL})\" && bash deploy.sh"
 run ALLOW "case arm after a data heredoc"    "cat <<'EOF' > f.txt${NL}op $R $U${NL}EOF${NL}case x in a) bash y ;; esac"
+run ALLOW "case arm inside a data group"     "(cat <<'EOF' > notes.txt${NL}op $R $U${NL}EOF${NL}case x in${NL}  a) bash y ;;${NL}esac${NL})"
+run ALLOW "parenthesized case arm in a data group" "(cat <<'EOF' > notes.txt${NL}op $R $U${NL}EOF${NL}case x in (a) bash y ;; esac${NL})"
 run ALLOW "prose closer inside a later body" "(cat <<'A' > a.md${NL}op $R $U${NL}A${NL}cat <<'B' > b.md${NL}2) ssh in${NL}B${NL})"
 
 # --- exemptions ---
