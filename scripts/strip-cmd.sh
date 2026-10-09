@@ -22,8 +22,28 @@ strip_cmd() {
     # The cluster spelling masks git commit -am like -m, but never a cluster holding c: -c is the flag every shell runs its operand with, so bash -cm would mask an executed command.
     my $FLAG = $mode eq "long-flags-only" ? $LONG : qr/$LONG|-(?![A-Za-z]*c)[A-Za-z]*m/;
     # A heredoc piped into an interpreter is executed by it, whatever the delimiter quoting did in the parent shell; the path-qualified spelling runs the same interpreter.
-    # The quotes are optional because the builtins execute `source "/dev/stdin"` exactly as they execute the bare spelling.
-    my $INTERP = qr{(?:^|[\s;&|(])(?:(?:[^\s;&|()<>]*/)?(?:(?:ba|z|k|da)?sh|python[\d.]*|perl|ruby|node|ssh|awk|xargs|env)(?:\s|$)|(?:source|\.)[ \t]+["\x27]?/dev/(?:stdin|fd/\d+))};
+    # The quotes are optional because the builtins execute `source "/dev/stdin"` exactly as they execute the bare spelling, and `source <(...)` runs whatever the substitution prints.
+    my $INTERP = qr{(?:^|[\s;&|(])(?:(?:[^\s;&|()<>]*/)?(?:(?:ba|z|k|da|c|tc|mk|fi)?sh|python[\d.]*|perl|ruby|node|ssh|awk|xargs|env|eval)(?:\s|$)|(?:source|\.)[ \t]+(?:["\x27]?/dev/(?:stdin|fd/\d+)|<\())};
+    # The interpreter is respelled like any verb (`| "sh"`, `\bash`), so it is looked for in the text normalize_cmd would produce.
+    my $runs = sub {
+      my $s = shift;
+      $s =~ s/\$?"([^"\s]*)"/$1/g;
+      $s =~ s/\$?\x27([^\x27\s]*)\x27/$1/g;
+      $s =~ s/\\//g;
+      return $s =~ $INTERP;
+    };
+    # A trailing | carries a pipeline past the newline, so the next non-blank line consumes the output too.
+    my $carry = sub {
+      my ($line, $rest) = @_;
+      while ($line =~ /(?<!\|)\|[ \t]*\z/ && $rest =~ /\G\s*\n[ \t]*([^\n]*)/gc) { $line .= " $1" }
+      return $line;
+    };
+    # Another heredoc body is data, so it is dropped before looking for the group around this one; a paren in its prose would otherwise read as that group closing.
+    my $unbody = sub {
+      my $s = shift;
+      $s =~ s/(?<!<)<<-?[ \t]*(["\x27]?)\\?([A-Za-z_][A-Za-z0-9_]*)\1([^\n]*)\n.*?\n[ \t]*\2\b/ $3/gs;
+      return $s;
+    };
 
     # Offsets inside a quoted region: a flag there is text, not a flag, and masking from it swallows whatever follows the closing quote.
     my @q;
@@ -58,10 +78,34 @@ strip_cmd() {
       return substr($p, $cut);
     };
     my $heredoc = sub {
-      my ($pre, $tail, $body, $all, $quoted, $post) = @_;
-      return $all if $owner->($pre) =~ $INTERP;
+      my ($pre, $tail, $body, $all, $quoted, $post, $before) = @_;
+      # A trailing backslash continues the opener line, so the line after it belongs to the command rather than to the body.
+      while ($tail =~ /\\\z/ && $body =~ s/\A([^\n]*)(?:\n|\z)//) { $tail .= "\n$1" }
+      return $all if $runs->($owner->($pre));
       # The rest of that line consumes the body too: `<<EOF | python3` feeds it to an interpreter exactly as a preceding command would.
-      return $all if $tail =~ $INTERP;
+      return $all if $runs->($carry->($tail, $post));
+      # Inside a group the body goes wherever the group sends it, so each group still open at the heredoc is judged by its opener (`eval "$(`) and by the closer that ends it after the body (`) | sh`).
+      my ($above, $depth, $groups) = ($unbody->("$before$pre"), 0, 0);
+      for (my $i = length($above) - 1; $i >= 0; $i--) {
+        my $c = substr($above, $i, 1);
+        if ($c eq ")" || $c eq "}") { $depth++ }
+        elsif ($c eq "(" || $c eq "{") {
+          if ($depth) { $depth--; next }
+          $groups++;
+          my $from = rindex($above, "\n", $i) + 1;
+          return $all if $runs->($owner->(substr($above, $from, $i + 1 - $from)));
+        }
+      }
+      my $below = $unbody->("$tail\n$post");
+      $depth = 0;
+      while ($groups && $below =~ /([(){}])/g) {
+        if ($1 eq "(" || $1 eq "{") { $depth++; next }
+        if ($depth) { $depth--; next }
+        $groups--;
+        my ($line, $rest) = substr($below, pos($below)) =~ /\A([^\n]*)(.*)\z/s;
+        $line =~ s/(?:;|&&|\|\|).*//;
+        return $all if $runs->($carry->($line, $rest));
+      }
       # A body written to a file is data only until something runs that file. If the destination is named again later in the same command, the masked region executes a few bytes on and must stay visible.
       for my $tok ("$pre $tail" =~ m{([^\s"\x27;&|<>()]*[/.][^\s"\x27;&|<>()]*)}g) {
         next if length($tok) < 3;
@@ -71,9 +115,9 @@ strip_cmd() {
       return "$pre<<STRIPPED_HEREDOC>>$tail";
     };
     # The operator does not have to end its line: `cat <<EOF > file` and `cat <<EOF | tee file` are the ordinary spellings, and requiring whitespace to the newline left both bodies unmasked.
-    $cmd =~ s{([^\n]*?)(?<!<)<<-?[ \t]*(["\x27])([A-Za-z_][A-Za-z0-9_]*)\2([^\n]*)\n(.*?)\n[ \t]*\3\b}{ $heredoc->($1, $4, $5, $&, 1, substr($cmd, $+[0])) }gse;
-    $cmd =~ s{([^\n]*?)(?<!<)<<-?[ \t]*\\([A-Za-z_][A-Za-z0-9_]*)([^\n]*)\n(.*?)\n[ \t]*\2\b}{ $heredoc->($1, $3, $4, $&, 1, substr($cmd, $+[0])) }gse;
-    $cmd =~ s{([^\n]*?)(?<!<)<<-?[ \t]*([A-Za-z_][A-Za-z0-9_]*)([^\n]*)\n(.*?)\n[ \t]*\2\b}{ $heredoc->($1, $3, $4, $&, 0, substr($cmd, $+[0])) }gse;
+    $cmd =~ s{([^\n]*?)(?<!<)<<-?[ \t]*(["\x27])([A-Za-z_][A-Za-z0-9_]*)\2([^\n]*)\n(.*?)\n[ \t]*\3\b}{ $heredoc->($1, $4, $5, $&, 1, substr($cmd, $+[0]), substr($cmd, 0, $-[0])) }gse;
+    $cmd =~ s{([^\n]*?)(?<!<)<<-?[ \t]*\\([A-Za-z_][A-Za-z0-9_]*)([^\n]*)\n(.*?)\n[ \t]*\2\b}{ $heredoc->($1, $3, $4, $&, 1, substr($cmd, $+[0]), substr($cmd, 0, $-[0])) }gse;
+    $cmd =~ s{([^\n]*?)(?<!<)<<-?[ \t]*([A-Za-z_][A-Za-z0-9_]*)([^\n]*)\n(.*?)\n[ \t]*\2\b}{ $heredoc->($1, $3, $4, $&, 0, substr($cmd, $+[0]), substr($cmd, 0, $-[0])) }gse;
 
     $mapq->();
     $cmd =~ s{(?<![-\w])($FLAG)([ =]*)"((?:\\.|[^"\\])*)"}{

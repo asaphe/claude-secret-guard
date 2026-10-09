@@ -148,6 +148,33 @@ run BLOCK "bare heredoc that substitutes"    "cat > f.txt <<EOF
 value=${SUB}op $R $U)
 EOF"
 
+# --- a heredoc body a shell runs is a command, however the shell reaches it ---
+NL=$'\n'
+run BLOCK "eval of a heredoc substitution"   "eval \"${SUB}cat <<'EOF'${NL}op $R $U${NL}EOF${NL})\""
+run BLOCK "eval opened on the line above"    "eval \"${SUB}${NL}cat <<'EOF'${NL}op $R $U${NL}EOF${NL})\""
+run BLOCK "source of a heredoc substitution" "source <(cat <<'EOF'${NL}op $R $U${NL}EOF${NL})"
+run BLOCK "dot of a heredoc substitution"    ". <(cat <<'EOF'${NL}op $R $U${NL}EOF${NL})"
+run BLOCK "pipe carried past the body"       "cat <<'EOF' |${NL}op $R $U${NL}EOF${NL}sh"
+run BLOCK "opener continued by a backslash"  "cat <<'EOF' | \\${NL}sh${NL}op $R $U${NL}EOF"
+run BLOCK "subshell piped to sh"             "(cat <<'EOF'${NL}op $R $U${NL}EOF${NL}) | sh"
+run BLOCK "substitution echoed into sh"      "echo \"${SUB}cat <<'EOF'${NL}op $R $U${NL}EOF${NL})\" | sh"
+run BLOCK "first of two heredocs in a group" "(cat <<'A'${NL}op $R $U${NL}A${NL}cat <<'B'${NL}true${NL}B${NL}) | sh"
+run BLOCK "group closed after another command" "(cat <<'EOF'${NL}aws $SM get-secret-value --secret-id s${NL}EOF${NL}echo done) | sh"
+run BLOCK "pipe to a quoted shell"           "cat <<'EOF' | \"sh\"${NL}op $R $U${NL}EOF"
+run BLOCK "pipe to a backslashed shell"      "cat <<'EOF' | \\bash${NL}op $R $U${NL}EOF"
+run BLOCK "quoted shell reading the heredoc" "\"bash\" <<'EOF'${NL}op $R $U${NL}EOF"
+run BLOCK "pipe to csh"                      "cat <<'EOF' | csh${NL}op $R $U${NL}EOF"
+run BLOCK "pipe to tcsh"                     "cat <<'EOF' | tcsh${NL}op $R $U${NL}EOF"
+run BLOCK "pipe to fish"                     "cat <<'EOF' | fish${NL}op $R $U${NL}EOF"
+run BLOCK "pipe to mksh"                     "cat <<'EOF' | mksh${NL}op $R $U${NL}EOF"
+# The same body stays masked where nothing runs it, or every commit message and runbook naming a fetch would block.
+run ALLOW "heredoc redirected to a file"     "cat <<'EOF' > f.txt${NL}op $R $U${NL}EOF"
+run ALLOW "heredoc piped to grep"            "cat <<'EOF' | grep x${NL}op $R $U${NL}EOF"
+run ALLOW "group redirected to a file"       "(cat <<'EOF'${NL}op $R $U${NL}EOF${NL}) > notes.txt"
+run ALLOW "message substitution, then a shell" "git commit -m \"${SUB}cat <<'EOF'${NL}op $R $U${NL}EOF${NL})\" && bash deploy.sh"
+run ALLOW "case arm after a data heredoc"    "cat <<'EOF' > f.txt${NL}op $R $U${NL}EOF${NL}case x in a) bash y ;; esac"
+run ALLOW "prose closer inside a later body" "(cat <<'A' > a.md${NL}op $R $U${NL}A${NL}cat <<'B' > b.md${NL}2) ssh in${NL}B${NL})"
+
 # --- exemptions ---
 run ALLOW "op item get is not a mask target" "op item get ABC --account example.1password.com --fields 'Client ID'"
 run ALLOW "op-cache wrapper"                 "\"\$CLAUDE_PLUGIN_ROOT\"/scripts/op-cache.sh --mask $U"
