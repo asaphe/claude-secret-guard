@@ -58,7 +58,36 @@ tokenize() {
     no warnings;
     use Text::ParseWords qw(shellwords);
     my $cmd = do { local $/; <STDIN> };
-    my @w = shellwords($cmd);
+    # Text the shell runs as a command line is split the way the shell splits it, and other quoted text, such as a grep or jq pattern, stays one word — see README § Flag masking and filenames.
+    my $tok;
+    $tok = sub {
+      my ($s, $depth) = @_;
+      # An unquoted |, ; or & is an operator, not part of a word: cat k.pem|head names k.pem.
+      my ($out, $st) = ("", 0);
+      for (my $i = 0; $i < length($s); $i++) {
+        my $c = substr($s, $i, 1);
+        if ($st != 1 && $c eq chr(92)) { $out .= substr($s, $i++, 2); next }
+        if ($st == 0) {
+          if ($c =~ /[|;&]/) { $out .= " $c "; next }
+          $st = 1 if $c eq "\x27";
+          $st = 2 if $c eq q{"};
+        } elsif ($st == 1) { $st = 0 if $c eq "\x27" }
+        else { $st = 0 if $c eq q{"} }
+        $out .= $c;
+      }
+      my @w = shellwords($out);
+      return @w if $depth > 3;
+      # The operand of a shell -c or of eval and the body of a $(...) substitution are command lines too: bash -c "cat k.pem | head". The shell must own the -c, or a jq -c filter would be split; backticks are left whole because Markdown code spans in a python heredoc use the same character.
+      my $SHELL = qr{(?:^|/)(?:ba|z|k|da|a|c|tc|mk|fi)?sh$};
+      my @run;
+      for my $i (0 .. $#w) {
+        push @run, $tok->($w[$i], $depth + 1)
+          if $i && (($w[$i - 1] =~ /^-[A-Za-z]*c[A-Za-z]*$/ && grep { $_ =~ $SHELL } @w[($i > 5 ? $i - 5 : 0) .. $i - 2]) || $w[$i - 1] =~ m{(?:^|/)eval$});
+        push @run, $tok->($1, $depth + 1) while $w[$i] =~ /\$\(((?:[^()]++|\((?1)\))*)\)/g;
+      }
+      return (@w, @run);
+    };
+    my @w = $tok->($cmd, 0);
     # Punctuation survives tokenizing glued to the filename — $'"'"'…'"'"', substitution syntax, and a trailing ; or & each defeat the end-anchored suffix patterns.
     @w = map { my $t = $_; $t =~ s/^\$//; $t =~ s/[()`]//g; $t =~ s/[;&]+$//; $t } @w;
     # A redirect glues its target to the reader, and the basename patterns are anchored: cat<.env is one token that matches nothing.
