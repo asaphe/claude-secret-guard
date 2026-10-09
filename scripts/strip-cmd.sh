@@ -48,7 +48,8 @@ strip_cmd() {
     my $uncase = sub {
       my $s = shift;
       my ($open, $await, $want, @arm) = (0, 0, 0);
-      while ($s =~ /(?:^|[\n;&|({]|\b(?:then|do|else))[ \t]*\K(case)(?=[ \t])|\b(in|esac)\b|(;;&?|;&)|([()])/g) {
+      # The keyword position is a lookbehind so an arm ) before a nested case is still seen as an arm.
+      while ($s =~ /(?:^|(?<=[\n;&|({)])|(?<=\bthen)|(?<=\bdo)|(?<=\belse))[ \t]*\K(case)(?=[ \t])|\b(in|esac)\b|(;;&?|;&)|([()])/g) {
         if (defined $1) { $open++; $await = 1 }
         elsif (defined $2) {
           if ($2 eq "in") { ($await, $want) = (0, 1) if $await }
