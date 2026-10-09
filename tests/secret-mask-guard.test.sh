@@ -176,6 +176,13 @@ run BLOCK "case arm before the group closer" "(cat <<'EOF'${NL}op $R $U${NL}EOF$
 run BLOCK "parenthesized case arm before the closer" "(cat <<'EOF'${NL}op $R $U${NL}EOF${NL}case x in (a) true ;; esac${NL}) | sh"
 run BLOCK "heredoc inside a case arm in a group" "(case x in a) cat <<'EOF'${NL}op $R $U${NL}EOF${NL};; b) true ;; esac${NL}) | sh"
 run BLOCK "case nested in an arm before the closer" "(cat <<'EOF'${NL}op $R $U${NL}EOF${NL}case x in a) case y in b) true ;; esac ;; esac${NL}) | sh"
+run BLOCK "quoted case pattern before the closer" "(cat <<'EOF'${NL}op $R $U${NL}EOF${NL}case x in \"a b\") true ;; esac${NL}) | sh"
+run BLOCK "quoted case prose before the closer" "(cat <<'EOF'${NL}op $R $U${NL}EOF${NL}echo \"foo; case study in detail\"${NL}) | sh"
+run BLOCK "single-quoted case prose before the closer" "(cat <<'EOF'${NL}op $R $U${NL}EOF${NL}echo 'foo; case study in detail'${NL}) | sh"
+run BLOCK "quoted paren then case before the closer" "(cat <<'EOF'${NL}op $R $U${NL}EOF${NL}echo \"(see above) case study in detail\"${NL}) | sh"
+run BLOCK "substitution then case word before the closer" "(cat <<'EOF'${NL}op $R $U${NL}EOF${NL}echo ${SUB}date) case y in b${NL}) | sh"
+run BLOCK "array then case word before the closer" "(cat <<'EOF'${NL}op $R $U${NL}EOF${NL}a=(1 2) case in${NL}) | sh"
+run BLOCK "case word after ;; in quotes before the closer" "(cat <<'EOF'${NL}op $R $U${NL}EOF${NL}echo \"x;; case in y\"${NL}) | sh"
 # The same body stays masked where nothing runs it, or every commit message and runbook naming a fetch would block.
 run ALLOW "heredoc redirected to a file"     "cat <<'EOF' > f.txt${NL}op $R $U${NL}EOF"
 run ALLOW "heredoc piped to grep"            "cat <<'EOF' | grep x${NL}op $R $U${NL}EOF"

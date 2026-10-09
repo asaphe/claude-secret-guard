@@ -48,15 +48,21 @@ strip_cmd() {
     my $uncase = sub {
       my $s = shift;
       my ($open, $await, $want, @arm) = (0, 0, 0);
-      # The keyword position is a lookbehind so an arm ) before a nested case is still seen as an arm.
-      while ($s =~ /(?:^|(?<=[\n;&|({)])|(?<=\bthen)|(?<=\bdo)|(?<=\belse))[ \t]*\K(case)(?=[ \t])|\b(in|esac)\b|(;;&?|;&)|([()])/g) {
+      # A quoted string is skipped whole: prose like "see (a); case in point" holds no keyword, and reading one there blanked the real group closer.
+      while ($s =~ /"(?:\\.|[^"\\])*"|\x27[^\x27]*\x27|(?:^|[\n;&|({]|\b(?:then|do|else))[ \t]*\K(case)(?=[ \t])|\b(in|esac)\b|(;;&?|;&)|([()])/g) {
         if (defined $1) { $open++; $await = 1 }
         elsif (defined $2) {
           if ($2 eq "in") { ($await, $want) = (0, 1) if $await }
           elsif ($open) { $open--; $want = 0 }
         }
         elsif (defined $3) { $want = 1 if $open }
-        elsif ($want) { push @arm, $-[0]; $want = 0 if $4 eq ")" }
+        elsif (defined $4 && $want) {
+          push @arm, $-[0];
+          next if $4 eq "(";
+          $want = 0;
+          # Only an arm closer makes the next word a keyword position, so a case nested in an arm opens here and no other ) does.
+          ($open, $await) = ($open + 1, 1) if substr($s, $+[0]) =~ /\A[ \t]*case[ \t]/;
+        }
       }
       substr($s, $_, 1) = " " for @arm;
       return $s;
