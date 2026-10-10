@@ -263,14 +263,16 @@ not close the window, since `head -2 <(find . -not -path '*/.git/*')`
 still has find governing its own arguments.
 
 Only a `find` in command position arms it: the first word, a word after
-`;`, `|`, `&` or a line break, the first word of a `$(…)`, `<(…)` or
-backtick substitution, or a word after `sudo`, `env`, `exec`, `time`,
+`;`, `|`, `&` or a line break, the first word of an unquoted `$(…)`,
+`<(…)` or backtick substitution or of a double-quoted one the gate
+follows (a single-quoted `'$(find'` is text), or a word after `sudo`, `env`, `exec`, `time`,
 `nohup`, `nice`, `command`, `xargs` or `doas`. A `find` that is only a
 word of text, such as a flag value or a heredoc line read as data, opens
 nothing, and the end of a comment, a body or a substitution closes the
-window, so a `find` inside one never reaches the words after it. The whole-command bare split, read when the command will not
-parse, is read with no exemption at all, since it cannot tell a command
-from text.
+window, so a `find` inside one never reaches the words after it. The
+whole-command bare split, read when the command will not parse or when
+`perl` is missing, is read with no exemption at all, since it cannot
+tell a command from text.
 
 Nothing positive is exempted, because a positive predicate can *widen*
 what a later `-exec` reads: `find . -name '*.pem'` still asks, and so

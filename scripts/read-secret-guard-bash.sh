@@ -125,6 +125,8 @@ tokenize() {
         if ($st != 1 && $c eq chr(92)) { $out .= substr($s, $i++, 2); next }
         if ($st == 0) {
           if ($c =~ /[|;&]/) { $out .= " $c "; next }
+          # Only an unquoted opener starts a command: a single-quoted $(find is literal text, and a double-quoted substitution is followed below and marked there.
+          $out .= " \x01 " if $c eq "`" || ($c eq "(" && ($i == 0 || substr($s, $i - 1, 1) !~ /[\$<>]/)) || ($c =~ /[\$<>]/ && substr($s, $i + 1, 1) eq "(");
           if ($c eq "\n") { $out .= " ; "; next }
           $st = 1 if $c eq "\x27";
           $st = 2 if $c eq q{"};
@@ -164,7 +166,7 @@ tokenize() {
     my @whole = shellwords($cmd);
     my @bare = (@whole && !$fell) ? () : ("\x02", (map { my $t = $_; $t =~ s/["\x27]//g; $t } ($cmd =~ /\S+/g)), "\x01");
     # Punctuation survives tokenizing glued to the filename — $'"'"'…'"'"', substitution syntax, and a trailing ; or & each defeat the end-anchored suffix patterns.
-    @w = map { my $t = $_; my @at = $t =~ /^(?:[\$<>]?\(|`)/ ? ("\x01") : (); my @end = $t =~ /[)`][;&]*$/ ? ("\x01") : (); $t =~ s/^\$//; $t =~ s/[()`]//g; $t =~ s/[;&]+$// unless $t =~ /^[;&|]+$/; $t =~ s/\$+$//; (@at, $t, @end) } @w;
+    @w = map { my $t = $_; my @end = $t =~ /[)`][;&]*$/ ? ("\x01") : (); $t =~ s/^\$//; $t =~ s/[()`]//g; $t =~ s/[;&]+$// unless $t =~ /^[;&|]+$/; $t =~ s/\$+$//; ($t, @end) } @w;
     # A redirect glues its target to the reader, and the basename patterns are anchored: cat<.env is one token that matches nothing.
     @w = grep { length } map { split /[<>]+/, $_ } @w;
     @w = (@bare, @w);
@@ -178,8 +180,8 @@ trap 'rm -f "$TOKENS_FILE"' EXIT
 tokenize "$CMD" >"$TOKENS_FILE" 2>/dev/null
 # A missing perl empties this, which would make every read silent — fall back to a bare split so the gate still asks.
 if [ ! -s "$TOKENS_FILE" ]; then
-  # The trailing newline is load-bearing: without it the final token has no NUL and `read -d ''` discards it at EOF.
-  { printf '%s' "$CMD" | tr -d '"'"'"'' | tr -s ' \t\n<>' '\n'; printf '\n'; } | tr '\n' '\0' >"$TOKENS_FILE"
+  # Led by the no-exemption marker, as the perl path's bare split is, since a bare split cannot tell a command from text; the trailing newline keeps `read -d ''` from discarding the last token at EOF.
+  { printf '\002\n'; printf '%s' "$CMD" | tr -d '"'"'"'' | tr -s ' \t\n<>' '\n'; printf '\n'; } | tr '\n' '\0' >"$TOKENS_FILE"
 fi
 
 # Matched with bash's own regex engine rather than a grep per test: this loop runs before every Bash call, and the forks it used to spend cost more than the scan it performs.
