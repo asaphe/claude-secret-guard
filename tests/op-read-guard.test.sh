@@ -90,6 +90,9 @@ run ALLOW "first read of an item before a prose value" "op item get SUBITEM --fi
 run BLOCK "its repeat with an account in a title"     "op item get SUBITEM --fields username \$(printf '' --title \"--account=other\")"
 run BLOCK "its repeat with fields in a body"          "op item get SUBITEM --fields username \$(printf '' --body \"--fields=password\")"
 run BLOCK "its repeat with an account after -m"       "op item get SUBITEM --fields username -m --account=other"
+# A bare --account in a comment is not read either: the shell skips it, so the reading without comment words keys the real one.
+run ALLOW "first read of an item before a bare comment" "op item get BARECMT --fields username"
+run BLOCK "its repeat with a bare account in a comment" "op item get BARECMT --fields username # --account=other"
 
 # Nothing in a command is masked as data, since whether it runs is not decided without parsing the shell, so a reference named in a commit message or a heredoc counts as its read.
 Q="'"

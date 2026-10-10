@@ -155,7 +155,24 @@ run ASK    "a body's piped find through the bare split"   "cat <<EOF${NL}x | fin
 run SILENT "control: a find on its own line still opens it" "cat notes.txt${NL}find . -not -name '*.pem'"
 run SILENT "control: a find in process substitution too"  "head -2 <(find . -not -name '*.pem')"
 run ASK    "a substitution's end closes the window"       "head -2 <(find .) ! -name .env*"
+run ASK    "the word after a substitution is an argument" "cat notes.txt \$(echo) find ! -name .env*"
+run ASK    "the same after a backtick substitution"       "cat notes.txt \`echo\` find ! -name .env*"
 run ASK    "a find as a flag value opens nothing"         "cat notes.txt --title find ! -name .env*"
+run ASK    "a single-quoted \$(find is text, not a command" "bash -c 'cat \${@: -1}' --body '\$(find' ! -name '.env*'"
+run SILENT "control: an unquoted substitution still opens it" "cat notes.txt; x=\$(find . -not -name '*.pem')"
+# With perl missing, the bash fallback's bare split is read with no exemption, as the perl path's bare split is.
+NOPERL=$(mktemp -d)
+printf '#!/bin/sh\nexit 127\n' >"$NOPERL/perl"; chmod +x "$NOPERL/perl"
+decide_noperl() {
+  local out
+  out=$(printf '%s' "$(jq -nc --arg c "$1" '{tool_input:{command:$c}}')" | PATH="$NOPERL:$PATH" bash "$GUARD" 2>/dev/null)
+  if printf '%s' "$out" | grep -q '"permissionDecision":[[:space:]]*"ask"'; then printf 'ASK'; else printf 'SILENT'; fi
+}
+for c in "cat notes.txt && git commit -m \"x | find\" && echo ! -name .env*" "cat notes.txt && echo ! -name .env*"; do
+  actual=$(decide_noperl "$c")
+  if [ "$actual" = ASK ]; then printf 'ok   no perl: %s\n' "$c"; pass=$((pass + 1)); else printf 'FAIL no perl: %s — expected ASK, got %s\n' "$c" "$actual"; fail=$((fail + 1)); fi
+done
+rm -rf "$NOPERL"
 # A body line that only starts with the delimiter is not the delimiter, and what follows it is read as well.
 run ASK    "a key glued to the delimiter on a body line"  "cat <<EOF${NL}notes${NL}EOF.env${NL}EOF"
 # An unparseable piece falls back to a bare split before the redirect split, so a glued redirect still names its file.
