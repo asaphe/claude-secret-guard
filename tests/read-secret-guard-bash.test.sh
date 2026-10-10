@@ -154,6 +154,8 @@ run ASK    "a body's find read through the bare split"    "cat <<EOF${NL}find${N
 run ASK    "a body's piped find through the bare split"   "cat <<EOF${NL}x | find${NL}EOF${NL}echo \"! -name .env* notes\" # ${Q}"
 run SILENT "control: a find on its own line still opens it" "cat notes.txt${NL}find . -not -name '*.pem'"
 run SILENT "control: a find in process substitution too"  "head -2 <(find . -not -name '*.pem')"
+run ASK    "a substitution's end closes the window"       "head -2 <(find .) ! -name .env*"
+run ASK    "a find as a flag value opens nothing"         "cat notes.txt --title find ! -name .env*"
 # A body line that only starts with the delimiter is not the delimiter, and what follows it is read as well.
 run ASK    "a key glued to the delimiter on a body line"  "cat <<EOF${NL}notes${NL}EOF.env${NL}EOF"
 # An unparseable piece falls back to a bare split before the redirect split, so a glued redirect still names its file.

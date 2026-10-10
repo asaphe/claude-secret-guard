@@ -109,8 +109,7 @@ while IFS= read -r SEG_RAW; do
   SEG_ONE=$(printf '%s' "$SEG_RAW" | tr -s '[:space:]' ' ')
   SEG_QSUB="[\"$SG_SQ]?"
   SEG_PAT="${OP_PRE}${SEG_QSUB}(document${SEG_QSUB}[[:space:]]+${SEG_QSUB}get|inject)${SEG_QSUB}"
-  # One tail per occurrence, each judged on its own and printed behind a T so an empty one survives the substitution: a quoted value naming the fetch can carry an --out-file, and the first occurrence alone let that clear a real fetch later in the segment.
-  # Each tail is read twice, once honouring backslash escapes, and both readings need a destination: an escaped quote does not end a quoted run, and only the stricter of the two readings may decide.
+  # Every occurrence's tail is printed behind a T, so an empty one survives, and read both plain and escape-aware; every reading must name a destination — see README § What this plugin does not do.
   SEG_TAILS=$(printf '%s' "$SEG_ONE" | awk -v pat="$SEG_PAT" -v sq="'" '
     function scan(tail, esc,   out, q, buf, i, c) {
       out = ""; q = ""; buf = ""

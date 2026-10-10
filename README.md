@@ -265,10 +265,10 @@ still has find governing its own arguments.
 Only a `find` in command position arms it: the first word, a word after
 `;`, `|`, `&` or a line break, the first word of a `$(…)`, `<(…)` or
 backtick substitution, or a word after `sudo`, `env`, `exec`, `time`,
-`nohup`, `nice`, `command`, `xargs` or `doas`. A `find` that is only
-text — named in a comment, a flag value or a heredoc body — opens
+`nohup`, `nice`, `command`, `xargs` or `doas`. A `find` that is only a
+word of text, such as a flag value or a heredoc line read as data, opens
 nothing, and the end of a comment, a body or a substitution closes the
-window. The whole-command bare split, read when the command will not
+window, so a `find` inside one never reaches the words after it. The whole-command bare split, read when the command will not
 parse, is read with no exemption at all, since it cannot tell a command
 from text.
 

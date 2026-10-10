@@ -164,7 +164,7 @@ tokenize() {
     my @whole = shellwords($cmd);
     my @bare = (@whole && !$fell) ? () : ("\x02", (map { my $t = $_; $t =~ s/["\x27]//g; $t } ($cmd =~ /\S+/g)), "\x01");
     # Punctuation survives tokenizing glued to the filename — $'"'"'…'"'"', substitution syntax, and a trailing ; or & each defeat the end-anchored suffix patterns.
-    @w = map { my $t = $_; my @at = $t =~ /^(?:[\$<>]?\(|`)/ ? ("\x01") : (); $t =~ s/^\$//; $t =~ s/[()`]//g; $t =~ s/[;&]+$// unless $t =~ /^[;&|]+$/; $t =~ s/\$+$//; (@at, $t) } @w;
+    @w = map { my $t = $_; my @at = $t =~ /^(?:[\$<>]?\(|`)/ ? ("\x01") : (); my @end = $t =~ /[)`][;&]*$/ ? ("\x01") : (); $t =~ s/^\$//; $t =~ s/[()`]//g; $t =~ s/[;&]+$// unless $t =~ /^[;&|]+$/; $t =~ s/\$+$//; (@at, $t, @end) } @w;
     # A redirect glues its target to the reader, and the basename patterns are anchored: cat<.env is one token that matches nothing.
     @w = grep { length } map { split /[<>]+/, $_ } @w;
     @w = (@bare, @w);
