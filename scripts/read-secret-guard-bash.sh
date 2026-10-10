@@ -57,7 +57,7 @@ tokenize() {
     my $pieces = sub {
       my ($s) = @_;
       my $code = "";
-      my (@out, @pend);
+      my (@out, @pend, @extra);
       my ($st, $n) = (0, length $s);
       for (my $i = 0; $i < $n; $i++) {
         my $c = substr($s, $i, 1);
@@ -97,8 +97,10 @@ tokenize() {
                 $line =~ s/\n\z//;
                 $line =~ s/^\t+// if $strip;
                 last if $line eq $d;
+                push @extra, substr($line, length $d) if length($d) && length($line) > length($d) && substr($line, 0, length $d) eq $d;
               }
-              push @out, ["bod", $body];
+              push @out, ["bod", $body], map { ["com", $_] } @extra;
+              @extra = ();
             }
             @pend = ();
             $i = $p - 1;
@@ -123,6 +125,7 @@ tokenize() {
         if ($st != 1 && $c eq chr(92)) { $out .= substr($s, $i++, 2); next }
         if ($st == 0) {
           if ($c =~ /[|;&]/) { $out .= " $c "; next }
+          if ($c eq "\n") { $out .= " ; "; next }
           $st = 1 if $c eq "\x27";
           $st = 2 if $c eq q{"};
         } elsif ($st == 1) { $st = 0 if $c eq "\x27" }
@@ -142,7 +145,7 @@ tokenize() {
       for my $p ($pieces->($s)) {
         my ($kind, $text) = @$p;
         # A heredoc body is tokenized like any command line, since a shell may be what reads it, at the same depth because each body is shorter than its parent; its own -c, eval and $(...) were followed in that call, and the marker after it keeps a find inside it from exempting anything later.
-        my @pw = $kind eq "bod" ? ($tok->($text, $depth), "\x01body-end") : $split->($text);
+        my @pw = $kind eq "bod" ? ($tok->($text, $depth), "\x01") : $kind eq "com" ? ($split->($text), "\x01") : $split->($text);
         push @w, @pw;
         push @own, ($kind ne "bod") x @pw;
       }
@@ -150,18 +153,18 @@ tokenize() {
       # The operand of a shell -c or of eval and the body of a $(...) substitution are command lines too: bash -c "cat k.pem | head". The shell must own the -c, or a jq -c filter would be split; backticks are left whole because Markdown code spans in a python heredoc use the same character.
       my $SHELL = qr{(?:^|/)(?:ba|z|k|da|a|c|tc|mk|fi)?sh$};
       for my $i (grep { $own[$_] } 0 .. $#w) {
-        push @run, $tok->($w[$i], $depth + 1)
+        push @run, "\x01", $tok->($w[$i], $depth + 1)
           if $i && (($w[$i - 1] =~ /^-[A-Za-z]*c[A-Za-z]*$/ && grep { $_ =~ $SHELL } @w[($i > 5 ? $i - 5 : 0) .. $i - 2]) || $w[$i - 1] =~ m{(?:^|/)eval$});
-        push @run, $tok->($1, $depth + 1) while $w[$i] =~ /\$\(((?:[^()]++|\((?1)\))*)\)/g;
+        push @run, "\x01", $tok->($1, $depth + 1) while $w[$i] =~ /\$\(((?:[^()]++|\((?1)\))*)\)/g;
       }
       return (@w, @run);
     };
     my @w = $tok->($cmd, 0);
     # An unbalanced quote used to expose every word through a bare split of the whole command, and with heredoc bodies masked that quote could sit anywhere, so the split stays, first and unaltered, whenever the whole or any piece will not parse.
     my @whole = shellwords($cmd);
-    my @bare = (@whole && !$fell) ? () : map { my $t = $_; $t =~ s/["\x27]//g; $t } ($cmd =~ /\S+/g);
+    my @bare = (@whole && !$fell) ? () : ("\x02", (map { my $t = $_; $t =~ s/["\x27]//g; $t } ($cmd =~ /\S+/g)), "\x01");
     # Punctuation survives tokenizing glued to the filename — $'"'"'…'"'"', substitution syntax, and a trailing ; or & each defeat the end-anchored suffix patterns.
-    @w = map { my $t = $_; $t =~ s/^\$//; $t =~ s/[()`]//g; $t =~ s/[;&]+$//; $t =~ s/\$+$//; $t } @w;
+    @w = map { my $t = $_; my @at = $t =~ /^(?:[\$<>]?\(|`)/ ? ("\x01") : (); $t =~ s/^\$//; $t =~ s/[()`]//g; $t =~ s/[;&]+$// unless $t =~ /^[;&|]+$/; $t =~ s/\$+$//; (@at, $t) } @w;
     # A redirect glues its target to the reader, and the basename patterns are anchored: cat<.env is one token that matches nothing.
     @w = grep { length } map { split /[<>]+/, $_ } @w;
     @w = (@bare, @w);
@@ -192,18 +195,21 @@ RE_KEY_PATH='\.kube/config$|(^|/)\.ssh(/|$)'
 # The exemption below is armed by a `find` TOKEN and disarmed by the next reader token, so it covers only the window in which find's own grammar governs — see README § Why a negated find predicate is exempt.
 RE_FIND_TOK='^([A-Za-z_][A-Za-z0-9_]*=)?\$?(.*/)?find$'
 RE_READER_TOK='^(.*/)?(cat|head|tail|less|more|grep)$'
+RE_CMD_START='^([;|&]+|sudo|doas|env|exec|time|nohup|nice|command|xargs)$'
 FIND_ACTIVE=""
+NO_EXEMPT=""
 PREV=""
 PREV2=""
 PREV3=""
 
 while IFS= read -r -d '' token; do
-  if [ "$token" = $'\001body-end' ]; then
-    FIND_ACTIVE=""; PREV=""; PREV2=""; PREV3=""
-    continue
-  fi
+  # \001 starts a command; \002 opens the whole-command bare split, read with no exemption so that text 0.6.5 masked cannot widen it there.
+  case "$token" in
+    $'\001') FIND_ACTIVE=""; PREV=""; PREV2=""; PREV3=""; NO_EXEMPT=""; continue ;;
+    $'\002') NO_EXEMPT=1; continue ;;
+  esac
   # A SINGLY negated find predicate whose operand is a WILDCARD can only SHRINK the set of files touched, so it is never a read target; a second negation makes it positive again and a literal operand is indistinguishable from a filename — see README § Why a negated find predicate is exempt.
-  if [ -n "$FIND_ACTIVE" ] \
+  if [ -n "$FIND_ACTIVE" ] && [ -z "$NO_EXEMPT" ] \
      && [[ $PREV =~ ^-(i?path|i?name|i?wholename|i?regex)$ ]] \
      && { [ "$PREV2" = "-not" ] || [ "$PREV2" = "!" ]; } \
      && [ "$PREV3" != "-not" ] && [ "$PREV3" != "!" ] \
@@ -211,7 +217,8 @@ while IFS= read -r -d '' token; do
     PREV3=$PREV2; PREV2=$PREV; PREV=$token
     continue
   fi
-  if [[ $token =~ $RE_FIND_TOK ]]; then
+  # Armed only by a find in command position, so prose that merely names find — a comment, a flag value, a body read as data — cannot open the exemption for a later word.
+  if [[ $token =~ $RE_FIND_TOK ]] && [[ -z $PREV || $PREV =~ $RE_CMD_START ]]; then
     FIND_ACTIVE=1
   elif [[ $token =~ $RE_READER_TOK ]]; then
     FIND_ACTIVE=""
