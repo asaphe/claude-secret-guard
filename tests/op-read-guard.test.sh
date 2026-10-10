@@ -77,6 +77,9 @@ run ALLOW "first read of a quoted item name"         "op item get \"quoted item\
 run BLOCK "its repeat beside a message of one quote" "op item get \"quoted item\" --fields password ; git commit -m '\"'"
 run BLOCK "the same with a two-line message after"   "op item get \"quoted item\" --fields password ; git commit -m '\"' -m \"one${NL}two\""
 run BLOCK "the same after a body with an apostrophe" "cat <<'EOF' > notes.txt${NL}'${NL}EOF${NL}op item get \"quoted item\" --fields password ; git commit -m '\"'"
+# A reference written in a comment or a prose value keys the segment beside its item, never in place of it.
+run ALLOW "an item read with a reference in its comment" "op item get CMTITEM --fields password # --title 'op://Vault/CmtItem/f'"
+run BLOCK "the plain repeat of that item"            "op item get CMTITEM --fields password"
 
 # Nothing in a command is masked as data, since whether it runs is not decided without parsing the shell, so a reference named in a commit message or a heredoc counts as its read.
 Q="'"

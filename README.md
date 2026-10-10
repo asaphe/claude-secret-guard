@@ -195,7 +195,8 @@ asks rather than going silent and `cat<.env` still names `.env`. When
 the command as a whole, or any piece of it, will not parse, the bare
 split of the whole command is read first as well, as it was before
 pieces were cut out, so the cut never makes the gate ask less often
-than it did.
+than it did. A body is read at the depth of the command around it, and a
+`find` inside a body does not carry its exemption past the body's end.
 
 Text the shell runs as a command line is split the way the shell splits
 it. An unquoted `|`, `;` or `&` ends a word, so `cat secrets.pem|head`

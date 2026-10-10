@@ -143,6 +143,10 @@ run ASK    "a fallback word before a later find"          "echo \"! -name *.pem 
 # Pieces keep their place in the command, so a find after a comment or a body does not reach back into it.
 run ASK    "a negated glob in a comment before a find"    "cat README.md # ! -name \"*.pem\"${NL}find ."
 run ASK    "a negated glob in a body before a find"       "cat <<'EOF' > notes.txt${NL}! -name *.pem${NL}EOF${NL}find ."
+# A find inside a body does not exempt a word after the body, and a body costs no depth.
+run ASK    "a find in a body, then a negated glob"        "cat <<'EOF'${NL}find${NL}EOF${NL}ls -- ! -name .env*"
+run ASK    "the same after an empty ANSI-C quote"         "cat <<'EOF'${NL}find${NL}EOF${NL}cat\$'' -- ! -name .env*"
+run ASK    "a shell -c four bodies deep"                  "bash <<E0${NL}bash <<E1${NL}bash <<E2${NL}bash <<E3${NL}bash -c 'cat .env x'${NL}E3${NL}E2${NL}E1${NL}E0"
 # An unparseable piece falls back to a bare split before the redirect split, so a glued redirect still names its file.
 run ASK    "unbalanced quote, glued redirect"             "cat<.env ${Q}x"
 

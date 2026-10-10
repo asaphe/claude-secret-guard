@@ -82,7 +82,9 @@ add_key() {
   if [ -n "$uri" ]; then
     KEYS="${KEYS}uri|${ACCOUNT}|${uri}"$'\n'
     WHATS="${WHATS}${uri}"$'\n'
-  elif [ -n "$ITEM" ]; then
+  fi
+  # A segment naming both keys both: a reference written in its comment or a prose value would otherwise stand in for the item it fetches.
+  if [ -n "$ITEM" ]; then
     # Sorted and deduplicated so the same fields requested in a different order are one identity, not two.
     norm=$(printf '%s' "${FIELDS#,}" | tr ',' '\n' | sed '/^[[:space:]]*$/d' | sort -u | tr '\n' ',' | sed 's/,$//')
     [ -n "$norm" ] || norm='(whole item)'

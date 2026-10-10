@@ -141,10 +141,10 @@ tokenize() {
       my (@w, @own, @run);
       for my $p ($pieces->($s)) {
         my ($kind, $text) = @$p;
-        # A heredoc body is tokenized like any command line, since a shell may be what reads it; its own -c, eval and $(...) were followed in that call, so they are not followed again here.
-        my @pw = $kind eq "bod" && $depth <= 3 ? $tok->($text, $depth + 1) : $split->($text);
+        # A heredoc body is tokenized like any command line, since a shell may be what reads it, at the same depth because each body is shorter than its parent; its own -c, eval and $(...) were followed in that call, and the marker after it keeps a find inside it from exempting anything later.
+        my @pw = $kind eq "bod" ? ($tok->($text, $depth), "\x01body-end") : $split->($text);
         push @w, @pw;
-        push @own, ($kind ne "bod" || $depth > 3) x @pw;
+        push @own, ($kind ne "bod") x @pw;
       }
       return @w if $depth > 3;
       # The operand of a shell -c or of eval and the body of a $(...) substitution are command lines too: bash -c "cat k.pem | head". The shell must own the -c, or a jq -c filter would be split; backticks are left whole because Markdown code spans in a python heredoc use the same character.
@@ -161,7 +161,7 @@ tokenize() {
     my @whole = shellwords($cmd);
     my @bare = (@whole && !$fell) ? () : map { my $t = $_; $t =~ s/["\x27]//g; $t } ($cmd =~ /\S+/g);
     # Punctuation survives tokenizing glued to the filename — $'"'"'…'"'"', substitution syntax, and a trailing ; or & each defeat the end-anchored suffix patterns.
-    @w = map { my $t = $_; $t =~ s/^\$//; $t =~ s/[()`]//g; $t =~ s/[;&]+$//; $t } @w;
+    @w = map { my $t = $_; $t =~ s/^\$//; $t =~ s/[()`]//g; $t =~ s/[;&]+$//; $t =~ s/\$+$//; $t } @w;
     # A redirect glues its target to the reader, and the basename patterns are anchored: cat<.env is one token that matches nothing.
     @w = grep { length } map { split /[<>]+/, $_ } @w;
     @w = (@bare, @w);
@@ -198,6 +198,10 @@ PREV2=""
 PREV3=""
 
 while IFS= read -r -d '' token; do
+  if [ "$token" = $'\001body-end' ]; then
+    FIND_ACTIVE=""; PREV=""; PREV2=""; PREV3=""
+    continue
+  fi
   # A SINGLY negated find predicate whose operand is a WILDCARD can only SHRINK the set of files touched, so it is never a read target; a second negation makes it positive again and a literal operand is indistinguishable from a filename — see README § Why a negated find predicate is exempt.
   if [ -n "$FIND_ACTIVE" ] \
      && [[ $PREV =~ ^-(i?path|i?name|i?wholename|i?regex)$ ]] \
