@@ -603,11 +603,11 @@ for guard in secret-mask-guard.sh read-secret-guard.sh read-secret-guard-bash.sh
 done
 
 COPY=$(plugin_copy base)
-# strip_cmd is why a commit message naming a fetch is not treated as one.
+# A flag value is never masked, so a commit message naming a fetch is held to the fetch's rule.
 authority_guard "$COPY" "git commit -m 'switch to op read op://Vault/Item/field'"
-assert_exit "a commit message mentioning a fetch is not itself a fetch" 0 $?
+assert_exit "a commit message naming a fetch blocks like the fetch" 2 $?
 
-# strip_cmd must recognise every delimiter spelling the Bash write guard does, or a heredoc naming a fetch is recorded as one and the next real fetch is refused as a duplicate.
+# A heredoc body is never masked, so under every delimiter spelling the Bash write guard recognises, a fetch named in one is recorded and the same fetch after it is a duplicate.
 for hd in "<<'PROSE'" '<<"PROSE"' '<<PROSE' '<<\PROSE' '<<-\PROSE' '<< PROSE' '<<- PROSE' '<< \PROSE'; do
   HD_SESSION="$SESSION_ID-hd-$(printf '%s' "$hd" | tr -dc 'A-Za-z')-$RANDOM"
   HD_CMD="cat $hd
@@ -619,23 +619,23 @@ PROSE"
       | "$COPY/scripts/op-read-guard.sh" >"$OUT" 2>"$ERR"
     HD_CODE=$?
   done
-  assert_exit "a heredoc body naming a fetch is not a fetch, delimiter $hd" 0 "$HD_CODE"
+  assert_exit "a heredoc body naming a fetch is recorded, delimiter $hd" 2 "$HD_CODE"
   rm -f "/tmp/claude-op-reads-$HD_SESSION"
 done
 
-# Each other strip_cmd caller reaches the same verdict; the mask guard is the one that fails on the first call rather than the second.
+# Each other guard sees the body too; the mask guard is the one that fails on the first call rather than the second.
 jq -n --arg c "cat <<\\PROSE
 switch to op read op://Vault/Item/field
 PROSE" '{tool_name:"Bash", tool_input:{command:$c}}' \
   | "$COPY/scripts/secret-mask-guard.sh" >"$OUT" 2>"$ERR"
-assert_exit "the mask guard reads a backslash heredoc body as prose too" 0 $?
+assert_exit "the mask guard sees a backslash heredoc body" 2 $?
 
-# The third caller asks rather than blocks, so its miss surfaces as a spurious confirmation prompt on a path named inside a heredoc.
+# The third caller asks rather than blocks, so a path named inside a heredoc raises its prompt.
 jq -n --arg s "$SESSION_ID-hdread" --arg c "cat <<\\PROSE
 then edit /home/u/.env by hand
 PROSE" '{session_id:$s, tool_name:"Bash", tool_input:{command:$c}}' \
   | "$COPY/scripts/read-secret-guard-bash.sh" >"$OUT" 2>"$ERR"
-if [ "$(jq -r '.hookSpecificOutput.permissionDecision // empty' <"$OUT")" = "ask" ]; then bad "a heredoc body naming .env raised the read ask"; else ok; fi
+if [ "$(jq -r '.hookSpecificOutput.permissionDecision // empty' <"$OUT")" = "ask" ]; then ok; else bad "a heredoc body naming .env did not raise the read ask"; fi
 
 # Negative control: the same path outside a heredoc must still raise it, or the assertion above would pass on a guard that never asks.
 jq -n --arg s "$SESSION_ID-hdread2" --arg c "cat /home/u/.env" \
@@ -643,11 +643,11 @@ jq -n --arg s "$SESSION_ID-hdread2" --arg c "cat /home/u/.env" \
   | "$COPY/scripts/read-secret-guard-bash.sh" >"$OUT" 2>"$ERR"
 if [ "$(jq -r '.hookSpecificOutput.permissionDecision // empty' <"$OUT")" = "ask" ]; then ok; else bad "a real .env read stopped asking"; fi
 
-# Negative control: masking must stay scoped to heredocs, or a real fetch alongside one would be swallowed.
+# Control: a fetch outside any heredoc blocks the same way.
 authority_guard "$COPY" "op read op://Vault/Item/still-real"
 assert_exit "a bare fetch outside any heredoc still blocks" 2 $?
 
-# A here-string is not a heredoc opener: allowing blanks after << lets <<< "WORD" match from the second <, masking every line up to a later WORD.
+# A here-string never hides the lines after it up to a later WORD.
 jq -n --arg c "wc -c <<< \"WORD\"
 op read op://Vault/Item/real
 WORD" '{tool_name:"Bash", tool_input:{command:$c}}' \

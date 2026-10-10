@@ -85,15 +85,13 @@ run ASK "less -m does not mask its argument"  "less -m \"$PEM\""
 # --- unparseable input must fail toward asking, never toward silence -----------
 run ASK "unbalanced quote still asks"         "cat \"$PEM"
 
-# --- prose describing a read must stay silent (the gate's masking) -------------
+# --- a quoted word stays one word, so prose naming a key is not a read of it ---
 run SILENT "commit message naming a reader"   'git commit -m "fix grep -r over .env files"'
-run SILENT "non-reader first word stays silent" "gh pr create --body \"run cat $PEM\""
-# First word is a reader, so the gate fires and only the flag masking keeps these silent.
-run SILENT "--body value is masked in the scan"      'cat README.md && gh pr create --body ".env"'
-run SILENT "--comment value is masked in the scan"   'cat README.md && gh issue comment 1 --comment ".env"'
-run SILENT "--description value is masked in the scan" 'cat README.md && gh repo edit --description ".env"'
-run SILENT "--message value is masked in the scan"    'cat README.md && git commit --message ".env"'
-run SILENT "heredoc body naming a file"       "$(printf 'cat <<EOF\n%s\nEOF' "$PEM")"
+# A flag value is never masked, so a reader and a key both named in one asks, wherever they sit.
+run ASK    "reader and key inside a --body"     "gh pr create --body \"run cat $PEM\""
+run ASK    "--body naming a key after a reader" 'cat README.md && gh pr create --body ".env"'
+run ASK    "--message naming a key after a reader" 'cat README.md && git commit --message ".env"'
+run ASK    "heredoc body naming a file"       "$(printf 'cat <<EOF\n%s\nEOF' "$PEM")"
 
 # --- a heredoc body a shell runs is a command, however the shell reaches it ---
 NL=$'\n'
@@ -114,13 +112,43 @@ run ASK    "pipe to csh"                         "cat <<'EOF' | csh${NL}cat $PEM
 run ASK    "pipe to tcsh"                        "cat <<'EOF' | tcsh${NL}cat $PEM${NL}EOF"
 run ASK    "pipe to fish"                        "cat <<'EOF' | fish${NL}cat $PEM${NL}EOF"
 run ASK    "pipe to mksh"                        "cat <<'EOF' | mksh${NL}cat $PEM${NL}EOF"
-# The same body stays masked where nothing runs it, or every commit message and runbook naming a key would ask.
-run SILENT "heredoc redirected to a file"        "cat <<'EOF' > f.txt${NL}cat $PEM${NL}EOF"
-run SILENT "heredoc piped to grep"               "cat <<'EOF' | grep x${NL}cat $PEM${NL}EOF"
-run SILENT "group redirected to a file"          "(cat <<'EOF'${NL}cat $PEM${NL}EOF${NL}) > notes.txt"
-run SILENT "message substitution, then a shell"  "git commit -m \"\$(cat <<'EOF'${NL}cat $PEM${NL}EOF${NL})\" && bash deploy.sh"
-run SILENT "case arm after a data heredoc"       "cat <<'EOF' > f.txt${NL}cat $PEM${NL}EOF${NL}case x in a) bash y ;; esac"
-run SILENT "prose closer inside a later body"    "(cat <<'A' > a.md${NL}cat $PEM${NL}A${NL}cat <<'B' > b.md${NL}2) ssh in${NL}B${NL})"
+# A body is never masked, even where nothing visibly runs it: a later command can run it from a variable, a file or a descriptor.
+run ASK    "heredoc redirected to a file"        "cat <<'EOF' > f.txt${NL}cat $PEM${NL}EOF"
+run ASK    "heredoc piped to grep"               "cat <<'EOF' | grep x${NL}cat $PEM${NL}EOF"
+run ASK "group redirected to a file"          "(cat <<'EOF'${NL}cat $PEM${NL}EOF${NL}) > notes.txt"
+run ASK "message substitution, then a shell"  "git commit -m \"\$(cat <<'EOF'${NL}cat $PEM${NL}EOF${NL})\" && bash deploy.sh"
+run ASK "case arm after a data heredoc"          "cat <<'EOF' > f.txt${NL}cat $PEM${NL}EOF${NL}case x in a) bash y ;; esac"
+run ASK "prose closer inside a later body"    "(cat <<'A' > a.md${NL}cat $PEM${NL}A${NL}cat <<'B' > b.md${NL}2) ssh in${NL}B${NL})"
+
+# --- a comment and a heredoc body are pieces of their own, so their quotes cannot pair with the code's ---
+Q="'"
+TAB=$'\t'
+run ASK    "apostrophe in a body, then a glued redirect"  "cat <<'EOF'${NL}can${Q}t${NL}EOF${NL}cat<.env"
+run ASK    "apostrophes in a body and a comment"          "cat <<'EOF' > notes.txt${NL}${Q}${NL}EOF${NL}cat .env${NL}# ${Q}"
+run ASK    "the same with a tab-stripped body"            "cat <<-'EOF' > notes.txt${NL}${TAB}${Q}${NL}${TAB}EOF${NL}cat .env${NL}# ${Q}"
+run ASK    "apostrophe in a comment, then a glued redirect" "# can${Q}t${NL}cat<.env"
+run ASK    "apostrophe in a trailing comment"             "cat .env # it${Q}s"
+run ASK    "apostrophes in two comments around a read"    "# it${Q}s${NL}cat .env${NL}# that${Q}s it"
+# Cut out, never dropped: the text of a comment or a body is still scanned.
+run ASK    "a key named in a comment"                     "cat notes.txt # $PEM"
+run ASK    "a key named in a comment after a body"        "cat <<'EOF' > notes.txt${NL}x${NL}EOF${NL}cat notes.txt # $PEM"
+run SILENT "a real multi-line quote stays one word"       "echo ${Q}${NL}cat .env${NL}# ${Q}"
+run SILENT "a # inside a word is not a comment"           "grep -c 'a#b' notes.txt"
+# When the whole command will not parse, its bare split stays, so the cut never asks less often than before it existed.
+run ASK    "quoted prose beside an apostrophe comment"    "echo \"cat .env\" # it${Q}s"
+run ASK    "a quoted key beside an apostrophe comment"    "cat \".env notes\" # it${Q}s"
+run ASK    "the same when a body holds the other apostrophe" "cat <<EOF${NL}${Q}${NL}EOF${NL}cat \".env notes\" # ${Q}"
+# That split is read first and on its own, so a find later in the command cannot exempt a word it exposed earlier.
+run ASK    "a fallback word before a later find"          "echo \"! -name *.pem x\" \"cat\" # it${Q}s${NL}find ."
+# Pieces keep their place in the command, so a find after a comment or a body does not reach back into it.
+run ASK    "a negated glob in a comment before a find"    "cat README.md # ! -name \"*.pem\"${NL}find ."
+run ASK    "a negated glob in a body before a find"       "cat <<'EOF' > notes.txt${NL}! -name *.pem${NL}EOF${NL}find ."
+# A find inside a body does not exempt a word after the body, and a body costs no depth.
+run ASK    "a find in a body, then a negated glob"        "cat <<'EOF'${NL}find${NL}EOF${NL}ls -- ! -name .env*"
+run ASK    "the same after an empty ANSI-C quote"         "cat <<'EOF'${NL}find${NL}EOF${NL}cat\$'' -- ! -name .env*"
+run ASK    "a shell -c four bodies deep"                  "bash <<E0${NL}bash <<E1${NL}bash <<E2${NL}bash <<E3${NL}bash -c 'cat .env x'${NL}E3${NL}E2${NL}E1${NL}E0"
+# An unparseable piece falls back to a bare split before the redirect split, so a glued redirect still names its file.
+run ASK    "unbalanced quote, glued redirect"             "cat<.env ${Q}x"
 
 # --- a quoted word holding a command line is read word by word, not only by how it ends ---
 run ASK    "key mid-string in bash -c"           "bash -c \"cat $PEM | head -1\""

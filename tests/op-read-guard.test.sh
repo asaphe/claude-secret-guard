@@ -55,29 +55,45 @@ run ALLOW "word merely containing op is ignored"     "stop reading the file"
 # fail-closed path is covered for every guard in fixtures.test.sh.
 run ALLOW "an empty command is ignored"              ""
 run ALLOW "op item get with no item fails open"      "op item get --format json"
-run ALLOW "unbalanced quote fails open"              "op item get $I --fields 'unclosed"
+run ALLOW "an unbalanced quote is still a first read" "op item get $I --fields 'unclosed"
+run BLOCK "and its repeat is a duplicate"            "op item get $I --fields 'unclosed"
 
-# A commit message or a runbook quoting a reference describes a fetch rather than performing one; keying the tracker on it refused the real read of that reference as a duplicate.
+# One unbalanced quote fails the whole split, so the lines are split one by one and only a line that still fails is bare-split.
+NL=$'\n'
+run ALLOW "first read of a field"                    "op item get $I --fields label=apos"
+run BLOCK "repeat after a body with an apostrophe"   "cat <<'EOF' > notes.txt${NL}'${NL}EOF${NL}op item get $I --fields label=apos"
+run BLOCK "repeat with an apostrophe in its comment" "op item get $I --fields label=apos # it's"
+run ALLOW "a quoted field on a clean line keeps its space" "cat <<'EOF' > notes.txt${NL}'${NL}EOF${NL}op item get $I --fields 'label=two words'"
+run BLOCK "so its repeat is that same identity"      "op item get $I --fields 'label=two words'"
+
+# Every segment's identity keys the command, so a read named earlier on the line, in a body or a message, does not hide the duplicate after it.
+run ALLOW "first read of the item a body precedes"   "op item get $I --fields label=later"
+run BLOCK "its repeat after a body naming another"   "cat <<'EOF'${NL}op item get OTHERITEM --fields label=later${NL}EOF${NL}op item get $I --fields label=later"
+run ALLOW "two reads in one command"                 "op item get $I --fields label=m1 && op item get $I --fields label=m2"
+run BLOCK "the second of them is recorded too"       "op item get $I --fields label=m2"
+
+# Unwrapping a pair such as '"' leaves a lone quote, so the command as written is tried, whole and then per line, before any bare split.
+run ALLOW "first read of a quoted item name"         "op item get \"quoted item\" --fields password"
+run BLOCK "its repeat beside a message of one quote" "op item get \"quoted item\" --fields password ; git commit -m '\"'"
+run BLOCK "the same with a two-line message after"   "op item get \"quoted item\" --fields password ; git commit -m '\"' -m \"one${NL}two\""
+run BLOCK "the same after a body with an apostrophe" "cat <<'EOF' > notes.txt${NL}'${NL}EOF${NL}op item get \"quoted item\" --fields password ; git commit -m '\"'"
+# A reference written in a comment or a prose value keys the segment beside its item, never in place of it.
+run ALLOW "an item read with a reference in its comment" "op item get CMTITEM --fields password # --title 'op://Vault/CmtItem/f'"
+run BLOCK "the plain repeat of that item"            "op item get CMTITEM --fields password"
+
+# Nothing in a command is masked as data, since whether it runs is not decided without parsing the shell, so a reference named in a commit message or a heredoc counts as its read.
 Q="'"
-run ALLOW "a heredoc documenting a reference"        "$(printf 'cat <<%sEOF%s > runbook.md\nrun: op read op://Vault/Doc/f\nEOF' "$Q" "$Q")"
-run ALLOW "the genuine read of it is still first"    "op read op://Vault/Doc/f"
-run BLOCK "and only then does it dedupe"             "op read op://Vault/Doc/f"
-run ALLOW "a commit message naming a reference"      "git commit -m 'use op read op://Vault/Msg/f here'"
-run ALLOW "the genuine read of that one too"         "op read op://Vault/Msg/f"
-# Piping the body to an interpreter runs it, so that spelling must still count as a fetch.
+run ALLOW "a commit message naming a reference is a read" "git commit -m 'use op read op://Vault/Msg/f here'"
+run BLOCK "so the read after it is a duplicate"      "op read op://Vault/Msg/f"
+run ALLOW "a heredoc naming a reference is a read"   "$(printf 'cat <<%sEOF%s > runbook.md\nrun: op read op://Vault/Doc/f\nEOF' "$Q" "$Q")"
+run BLOCK "so the read after it is a duplicate"      "op read op://Vault/Doc/f"
 run ALLOW "a heredoc piped to a shell is a fetch"    "$(printf 'cat <<%sEOF%s | bash\nop read op://Vault/Exec/f\nEOF' "$Q" "$Q")"
 run BLOCK "so the read after it is a duplicate"      "op read op://Vault/Exec/f"
 
-# A heredoc body is data only until something runs the file it was written to; masking it unconditionally hid a fetch that executes a few bytes later.
 run ALLOW "a script written by heredoc is a fetch"    "$(printf 'cat <<%sEOF%s > /tmp/x.sh\nop read op://Vault/Script/f\nEOF\nbash /tmp/x.sh' "$Q" "$Q")"
 run BLOCK "so the read after it is a duplicate"       "op read op://Vault/Script/f"
 run ALLOW "the same via tee then sh"                  "$(printf 'tee /tmp/y.sh <<%sEOF%s >/dev/null\nop read op://Vault/Teed/f\nEOF\nsh /tmp/y.sh' "$Q" "$Q")"
 run BLOCK "and that one dedupes too"                  "op read op://Vault/Teed/f"
-# Named again means the whole path, not a prefix of one: a substring test kept every runbook visible whose destination happened to prefix a later word.
-run ALLOW "a path that only prefixes a later one"     "$(printf 'cat <<%sEOF%s > /tmp/run\nrun: op read op://Vault/Prefix/f\nEOF\necho /tmp/runtime' "$Q" "$Q")"
-run ALLOW "its genuine read is still first"           "op read op://Vault/Prefix/f"
-run ALLOW "a runbook with an unrelated command after" "$(printf 'cat <<%sEOF%s > guide.md\nrun: op read op://Vault/Guide/f\nEOF\necho done' "$Q" "$Q")"
-run ALLOW "its genuine read is still first"           "op read op://Vault/Guide/f"
 
 ok()  { printf 'ok   %s\n' "$1"; pass=$((pass + 1)); }
 bad() { printf 'FAIL %s — %s\n' "$1" "$2"; fail=$((fail + 1)); }

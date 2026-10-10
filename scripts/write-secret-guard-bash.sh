@@ -21,7 +21,6 @@ if ! CMD=$(printf '%s' "$INPUT" | jq -r '.tool_input.command // empty' 2>/dev/nu
 fi
 [ -z "$CMD" ] && exit 0
 
-# normalize_cmd only, never strip_cmd: this is the one guard whose payload IS the heredoc body, so masking it would hide the very text being written.
 # Both spellings are scanned as two lines rather than the normalized one alone: the raw line is where an escape is part of the secret's own boundary, and normalization widens most of these predicates but narrows the two that require a quote character, open('f','w') and git commit -m"…".
 WRITE_SCAN=$(printf '%s\n%s' "$CMD" "$(normalize_cmd "$CMD")")
 
@@ -33,7 +32,7 @@ printf '%s\n' "$WRITE_SCAN" | grep -qE '\btee\b' && IS_WRITE=1
 printf '%s\n' "$WRITE_SCAN" | grep -qE '\b(dd|truncate)\b|\b(sed|perl|ruby)\b[^|;&]*([[:space:]]-[A-Za-z]*i|--in-place)|(^|[;&|])[[:space:]]*(sudo[[:space:]]+)?([A-Za-z0-9_.-]*/)*install[[:space:]]|\b(curl|wget)\b[^|;&]*([[:space:]]-[A-Za-z]*[oO]|--output)' && IS_WRITE=1
 # The mode argument, not any w/a in the path: open('data.json') is a read.
 printf '%s\n' "$WRITE_SCAN" | grep -qE "\bopen\([^)]*,[^)]*['\"][wax]" && IS_WRITE=1
-# A commit or tag message persists to disk in git history, which is why this guard alone does not strip_cmd the way the fetch-detecting guards do.
+# A commit or tag message persists to disk in git history, so it is a write like any file.
 printf '%s\n' "$WRITE_SCAN" | grep -qE '\bgit\b[^|;&]*[[:space:]](commit|tag)\b[^|;&]*([[:space:]]-[A-Za-z]*[mF]([[:space:]]|=|"|'"'"')|--message|--file)' && IS_WRITE=1
 # An fd prefix is part of the operator; >& reaches a file unless its target is a digit or -, which is duplication; >( is a write-side substitution.
 printf '%s\n' "$WRITE_SCAN" | grep -qE '[0-9&]?>>?[[:space:]]*([^&>[:space:]]|&[[:space:]]*[^0-9>&[:space:]-])' && IS_WRITE=1
