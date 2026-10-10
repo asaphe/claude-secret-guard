@@ -196,7 +196,10 @@ the command as a whole, or any piece of it, will not parse, the bare
 split of the whole command is read first as well, as it was before
 pieces were cut out, so the cut never makes the gate ask less often
 than it did. A body is read at the depth of the command around it, and a
-`find` inside a body does not carry its exemption past the body's end.
+`find` inside a body does not carry its exemption past the body's end. A
+body line that only begins with the delimiter (`EOF.env` under `<<EOF`)
+does not end the body, and what follows the delimiter on that line is
+read as a word as well.
 
 Text the shell runs as a command line is split the way the shell splits
 it. An unquoted `|`, `;` or `&` ends a word, so `cat secrets.pem|head`
@@ -258,6 +261,16 @@ both of those, and in `echo "use find for this"; cat -not -path .env`,
 where the word never named a command at all. A reader *before* find does
 not close the window, since `head -2 <(find . -not -path '*/.git/*')`
 still has find governing its own arguments.
+
+Only a `find` in command position arms it: the first word, a word after
+`;`, `|`, `&` or a line break, the first word of a `$(…)`, `<(…)` or
+backtick substitution, or a word after `sudo`, `env`, `exec`, `time`,
+`nohup`, `nice`, `command`, `xargs` or `doas`. A `find` that is only
+text — named in a comment, a flag value or a heredoc body — opens
+nothing, and the end of a comment, a body or a substitution closes the
+window. The whole-command bare split, read when the command will not
+parse, is read with no exemption at all, since it cannot tell a command
+from text.
 
 Nothing positive is exempted, because a positive predicate can *widen*
 what a later `-exec` reads: `find . -name '*.pem'` still asks, and so

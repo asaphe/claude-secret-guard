@@ -147,6 +147,15 @@ run ASK    "a negated glob in a body before a find"       "cat <<'EOF' > notes.t
 run ASK    "a find in a body, then a negated glob"        "cat <<'EOF'${NL}find${NL}EOF${NL}ls -- ! -name .env*"
 run ASK    "the same after an empty ANSI-C quote"         "cat <<'EOF'${NL}find${NL}EOF${NL}cat\$'' -- ! -name .env*"
 run ASK    "a shell -c four bodies deep"                  "bash <<E0${NL}bash <<E1${NL}bash <<E2${NL}bash <<E3${NL}bash -c 'cat .env x'${NL}E3${NL}E2${NL}E1${NL}E0"
+# A find opens the exemption only in command position, a comment's end closes it, and the whole-command bare split is read with no exemption at all.
+run ASK    "a find named in a comment's flag value"       "cat README.md # --title \"find\"${NL}echo ! -name \".env*\""
+run ASK    "a find after a separator inside a comment"    "cat README.md # x ; find${NL}echo ! -name \".env*\""
+run ASK    "a body's find read through the bare split"    "cat <<EOF${NL}find${NL}EOF${NL}echo \"! -name .env* notes\" # ${Q}"
+run ASK    "a body's piped find through the bare split"   "cat <<EOF${NL}x | find${NL}EOF${NL}echo \"! -name .env* notes\" # ${Q}"
+run SILENT "control: a find on its own line still opens it" "cat notes.txt${NL}find . -not -name '*.pem'"
+run SILENT "control: a find in process substitution too"  "head -2 <(find . -not -name '*.pem')"
+# A body line that only starts with the delimiter is not the delimiter, and what follows it is read as well.
+run ASK    "a key glued to the delimiter on a body line"  "cat <<EOF${NL}notes${NL}EOF.env${NL}EOF"
 # An unparseable piece falls back to a bare split before the redirect split, so a glued redirect still names its file.
 run ASK    "unbalanced quote, glued redirect"             "cat<.env ${Q}x"
 

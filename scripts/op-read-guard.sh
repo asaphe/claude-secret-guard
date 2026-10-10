@@ -49,9 +49,8 @@ fi
 # printf is named rather than xargs' default echo, whose GNU build reads --help/--version/-n as its own flags and rewrites the token stream; quoting rules still apply so a quoted --fields value stays one token.
 # A newline terminates a command exactly as `;` does, but xargs flattens it away — without this the segments merge and a reference printed on one line keys a fetch on another; a trailing backslash is a continuation, so it gets no separator.
 SEGMENTED=$(printf '%s\n' "$CMD" | sed 's/\([^\\]\)$/\1 ;/')
-# One unbalanced quote fails the whole split: an apostrophe in a heredoc body or a comment, or one that unwrapping a pair such as '"' left behind. So the command as written is tried next, then each line on its own — normalized, as written, and bare only when both fail.
-if ! TOKENS=$(printf '%s\n' "$SEGMENTED" | xargs -n1 printf '%s\n' 2>/dev/null) \
-   && ! TOKENS=$(printf '%s\n' "$RAW_CMD" | sed 's/\([^\\]\)$/\1 ;/' | xargs -n1 printf '%s\n' 2>/dev/null); then
+# One unbalanced quote fails the whole split: an apostrophe in a heredoc body or a comment, or one that unwrapping a pair such as '"' left behind. So each line is split on its own — normalized, then as written, and bare only when both fail; xargs refuses a newline inside quotes, so retrying the whole command as written never parses more.
+if ! TOKENS=$(printf '%s\n' "$SEGMENTED" | xargs -n1 printf '%s\n' 2>/dev/null); then
   TOKENS=$(printf '%s\n' "$RAW_CMD" | while IFS= read -r LINE; do
     LINE="$LINE ;"
     NLINE=$(normalize_cmd "$LINE")
@@ -93,45 +92,55 @@ add_key() {
   fi
 }
 
-while IFS= read -r TOK; do
-  # Shell punctuation is not an argument: without this, `op item get --help 2>&1 | head` records "2>&1" as the item name.
-  case "$TOK" in
-    # Every segment that produced identity keys the command, not only the first: a heredoc or a message naming another read sits earlier on the line, and keying on it alone let the real duplicate after it through. A reference is identity only in a segment that actually invoked op — printed elsewhere it is text.
-    '|'|';'|'&'|'&&'|'||')
-      if [ -n "$ITEM" ] || { [ -n "$SEG_URI" ] && [ "$SEG_OP" -eq 1 ]; }; then add_key; fi
-      ACCOUNT=""; ITEM=""; FIELDS=""; SEEN_GET=0; PENDING=""; SEG_URI=""; SEG_OP=0
-      continue ;;
-    *'>'*|*'<'*) continue ;;
-  esac
-  if [ -n "$PENDING" ]; then
-    case "$PENDING" in
-      --account) ACCOUNT="$TOK" ;;
-      --fields|--field) FIELDS="$FIELDS,$TOK" ;;
+# Read twice, once with comment words and once without, and every key from both is used: words after a # are text the shell skips, but reading them is what 0.6.5 did, and either reading alone loses a key the other finds.
+read_keys() {
+  ACCOUNT=""; ITEM=""; FIELDS=""; SEEN_GET=0; PENDING=""; SEG_URI=""; SEG_OP=0; IN_COMMENT=0
+  while IFS= read -r TOK; do
+    # Shell punctuation is not an argument: without this, `op item get --help 2>&1 | head` records "2>&1" as the item name.
+    case "$TOK" in
+      # Every segment that produced identity keys the command, not only the first: a heredoc or a message naming another read sits earlier on the line, and keying on it alone let the real duplicate after it through. A reference is identity only in a segment that actually invoked op — printed elsewhere it is text.
+      '|'|';'|'&'|'&&'|'||')
+        if [ -n "$ITEM" ] || { [ -n "$SEG_URI" ] && [ "$SEG_OP" -eq 1 ]; }; then add_key; fi
+        ACCOUNT=""; ITEM=""; FIELDS=""; SEEN_GET=0; PENDING=""; SEG_URI=""; SEG_OP=0; IN_COMMENT=0
+        continue ;;
+      *'>'*|*'<'*) continue ;;
     esac
-    PENDING=""
-    continue
-  fi
-  case "$TOK" in
-    --account=*) ACCOUNT="${TOK#--account=}" ;;
-    --fields=*)  FIELDS="$FIELDS,${TOK#--fields=}" ;;
-    --field=*)   FIELDS="$FIELDS,${TOK#--field=}" ;;
-    # Only flags the CLI declares an argument type for: a boolean listed here swallows the next token, and when that is --account the key loses it.
-    --account|--fields|--field|--format|--vault|--session|--config|--encoding) PENDING="$TOK" ;;
-    get) SEEN_GET=1 ;;
-    op://*) SEG_URI="$TOK" ;;
-    -*) : ;;
-    # Identity first: a reference or item name that happens to read as the binary is still identity, so the command word is only what is left over.
-    *)
-      if [ "$SEEN_GET" -eq 1 ] && [ -z "$ITEM" ]; then
-        ITEM="$TOK"
-      else
-        case "$TOK" in op|*/op) SEG_OP=1 ;; esac
-      fi ;;
-  esac
-done <<EOF
+    if [ "$1" -eq 1 ]; then
+      [ "$IN_COMMENT" -eq 1 ] && continue
+      case "$TOK" in '#'*) IN_COMMENT=1; continue ;; esac
+    fi
+    if [ -n "$PENDING" ]; then
+      case "$PENDING" in
+        --account) ACCOUNT="$TOK" ;;
+        --fields|--field) FIELDS="$FIELDS,$TOK" ;;
+      esac
+      PENDING=""
+      continue
+    fi
+    case "$TOK" in
+      --account=*) ACCOUNT="${TOK#--account=}" ;;
+      --fields=*)  FIELDS="$FIELDS,${TOK#--fields=}" ;;
+      --field=*)   FIELDS="$FIELDS,${TOK#--field=}" ;;
+      # Only flags the CLI declares an argument type for: a boolean listed here swallows the next token, and when that is --account the key loses it.
+      --account|--fields|--field|--format|--vault|--session|--config|--encoding) PENDING="$TOK" ;;
+      get) SEEN_GET=1 ;;
+      op://*) SEG_URI="$TOK" ;;
+      -*) : ;;
+      # Identity first: a reference or item name that happens to read as the binary is still identity, so the command word is only what is left over.
+      *)
+        if [ "$SEEN_GET" -eq 1 ] && [ -z "$ITEM" ]; then
+          ITEM="$TOK"
+        else
+          case "$TOK" in op|*/op) SEG_OP=1 ;; esac
+        fi ;;
+    esac
+  done <<EOF
 $TOKENS
 EOF
-add_key
+  add_key
+}
+read_keys 0
+read_keys 1
 
 # Scanning the whole command keys on the first reference that merely appears in it, so fall back to that only when no segment named a reference or an item to key on.
 if [ -z "$KEYS" ]; then
