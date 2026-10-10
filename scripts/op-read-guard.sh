@@ -92,19 +92,28 @@ add_key() {
   fi
 }
 
-# Read twice, once with comment words and once without, and every key from both is used: words after a # are text the shell skips, but reading them is what 0.6.5 did, and either reading alone loses a key the other finds.
+# Read three ways — as written, without words after a #, and without the values of prose flags such as -m, --body and --title — and every key from all three is used: 0.6.5 read comments but masked those values, and any one reading alone loses a key another finds.
 read_keys() {
-  ACCOUNT=""; ITEM=""; FIELDS=""; SEEN_GET=0; PENDING=""; SEG_URI=""; SEG_OP=0; IN_COMMENT=0
+  ACCOUNT=""; ITEM=""; FIELDS=""; SEEN_GET=0; PENDING=""; SEG_URI=""; SEG_OP=0; IN_COMMENT=0; SKIP_NEXT=0
   while IFS= read -r TOK; do
     # Shell punctuation is not an argument: without this, `op item get --help 2>&1 | head` records "2>&1" as the item name.
     case "$TOK" in
       # Every segment that produced identity keys the command, not only the first: a heredoc or a message naming another read sits earlier on the line, and keying on it alone let the real duplicate after it through. A reference is identity only in a segment that actually invoked op — printed elsewhere it is text.
       '|'|';'|'&'|'&&'|'||')
         if [ -n "$ITEM" ] || { [ -n "$SEG_URI" ] && [ "$SEG_OP" -eq 1 ]; }; then add_key; fi
-        ACCOUNT=""; ITEM=""; FIELDS=""; SEEN_GET=0; PENDING=""; SEG_URI=""; SEG_OP=0; IN_COMMENT=0
+        ACCOUNT=""; ITEM=""; FIELDS=""; SEEN_GET=0; PENDING=""; SEG_URI=""; SEG_OP=0; IN_COMMENT=0; SKIP_NEXT=0
         continue ;;
       *'>'*|*'<'*) continue ;;
     esac
+    if [ "$1" -eq 2 ]; then
+      if [ "$SKIP_NEXT" -eq 1 ]; then SKIP_NEXT=0; continue; fi
+      case "$TOK" in
+        --message|--body|--title|--notes|--description|--comment) SKIP_NEXT=1; continue ;;
+        --message=*|--body=*|--title=*|--notes=*|--description=*|--comment=*) continue ;;
+        -*c*) ;;
+        -*m) case "$TOK" in --*) ;; *) SKIP_NEXT=1; continue ;; esac ;;
+      esac
+    fi
     if [ "$1" -eq 1 ]; then
       [ "$IN_COMMENT" -eq 1 ] && continue
       case "$TOK" in '#'*) IN_COMMENT=1; continue ;; esac
@@ -141,6 +150,7 @@ EOF
 }
 read_keys 0
 read_keys 1
+read_keys 2
 
 # Scanning the whole command keys on the first reference that merely appears in it, so fall back to that only when no segment named a reference or an item to key on.
 if [ -z "$KEYS" ]; then

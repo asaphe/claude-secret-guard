@@ -80,9 +80,16 @@ run BLOCK "the same after a body with an apostrophe" "cat <<'EOF' > notes.txt${N
 # A reference written in a comment or a prose value keys the segment beside its item, never in place of it.
 run ALLOW "an item read with a reference in its comment" "op item get CMTITEM --fields password # --title 'op://Vault/CmtItem/f'"
 run BLOCK "the plain repeat of that item"            "op item get CMTITEM --fields password"
+run ALLOW "an item read naming a reference as well"  "op item get REFITEM --fields password --tags op://Vault/RefItem/f"
+run BLOCK "the plain repeat of that item too"        "op item get REFITEM --fields password"
 # Words after a # are read both with and without, so an --account written in a comment cannot replace the real one.
 run ALLOW "first read of an item before a comment"   "op item get ACCTITEM --fields username"
 run BLOCK "its repeat with an account in a comment"  "op item get ACCTITEM --fields username # --title \"--account=other\""
+# A prose flag's value is read with and without, so an --account or --fields spelled inside a --title or --body cannot replace the real one.
+run ALLOW "first read of an item before a prose value" "op item get SUBITEM --fields username"
+run BLOCK "its repeat with an account in a title"     "op item get SUBITEM --fields username \$(printf '' --title \"--account=other\")"
+run BLOCK "its repeat with fields in a body"          "op item get SUBITEM --fields username \$(printf '' --body \"--fields=password\")"
+run BLOCK "its repeat with an account after -m"       "op item get SUBITEM --fields username -m --account=other"
 
 # Nothing in a command is masked as data, since whether it runs is not decided without parsing the shell, so a reference named in a commit message or a heredoc counts as its read.
 Q="'"
