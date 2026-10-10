@@ -166,7 +166,7 @@ tokenize() {
     my @whole = shellwords($cmd);
     my @bare = (@whole && !$fell) ? () : ("\x02", (map { my $t = $_; $t =~ s/["\x27]//g; $t } ($cmd =~ /\S+/g)), "\x01");
     # Punctuation survives tokenizing glued to the filename — $'"'"'…'"'"', substitution syntax, and a trailing ; or & each defeat the end-anchored suffix patterns.
-    @w = map { my $t = $_; my @end = $t =~ /[)`][;&]*$/ ? ("\x01") : (); $t =~ s/^\$//; $t =~ s/[()`]//g; $t =~ s/[;&]+$// unless $t =~ /^[;&|]+$/; $t =~ s/\$+$//; ($t, @end) } @w;
+    @w = map { my $t = $_; my @end = $t =~ /[)`][;&]*$/ ? ("\x03") : (); $t =~ s/^\$//; $t =~ s/[()`]//g; $t =~ s/[;&]+$// unless $t =~ /^[;&|]+$/; $t =~ s/\$+$//; ($t, @end) } @w;
     # A redirect glues its target to the reader, and the basename patterns are anchored: cat<.env is one token that matches nothing.
     @w = grep { length } map { split /[<>]+/, $_ } @w;
     @w = (@bare, @w);
@@ -205,10 +205,11 @@ PREV2=""
 PREV3=""
 
 while IFS= read -r -d '' token; do
-  # \001 starts a command; \002 opens the whole-command bare split, read with no exemption so that text 0.6.5 masked cannot widen it there.
+  # \001 starts a command; \002 opens the whole-command bare split, read with no exemption so that text 0.6.5 masked cannot widen it there; \003 closes a substitution, whose next word is an argument, not a command.
   case "$token" in
     $'\001') FIND_ACTIVE=""; PREV=""; PREV2=""; PREV3=""; NO_EXEMPT=""; continue ;;
     $'\002') NO_EXEMPT=1; continue ;;
+    $'\003') FIND_ACTIVE=""; PREV=$'\003'; PREV2=""; PREV3=""; continue ;;
   esac
   # A SINGLY negated find predicate whose operand is a WILDCARD can only SHRINK the set of files touched, so it is never a read target; a second negation makes it positive again and a literal operand is indistinguishable from a filename — see README § Why a negated find predicate is exempt.
   if [ -n "$FIND_ACTIVE" ] && [ -z "$NO_EXEMPT" ] \

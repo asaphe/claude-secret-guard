@@ -155,6 +155,8 @@ run ASK    "a body's piped find through the bare split"   "cat <<EOF${NL}x | fin
 run SILENT "control: a find on its own line still opens it" "cat notes.txt${NL}find . -not -name '*.pem'"
 run SILENT "control: a find in process substitution too"  "head -2 <(find . -not -name '*.pem')"
 run ASK    "a substitution's end closes the window"       "head -2 <(find .) ! -name .env*"
+run ASK    "the word after a substitution is an argument" "cat notes.txt \$(echo) find ! -name .env*"
+run ASK    "the same after a backtick substitution"       "cat notes.txt \`echo\` find ! -name .env*"
 run ASK    "a find as a flag value opens nothing"         "cat notes.txt --title find ! -name .env*"
 run ASK    "a single-quoted \$(find is text, not a command" "bash -c 'cat \${@: -1}' --body '\$(find' ! -name '.env*'"
 run SILENT "control: an unquoted substitution still opens it" "cat notes.txt; x=\$(find . -not -name '*.pem')"
