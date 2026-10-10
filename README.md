@@ -51,8 +51,8 @@ claude plugin install secret-guard@claude-secret-guard
 ```
 
 No external dependencies beyond what you're already using: `jq` (hook
-JSON parsing), `perl` (command-text normalization, ships with macOS and
-most Linux distributions), and `op`/`aws` CLI only if you use the
+JSON parsing), `perl` (the reader gate's word splitting, ships with macOS
+and most Linux distributions), and `op`/`aws` CLI only if you use the
 masked-cache wrappers.
 
 ## Failing closed
@@ -70,31 +70,23 @@ JSON does not parse, and every check downstream treats empty as "nothing
 here", which silently disarms the guard. That is deliberate and it is not
 free: with `jq` absent, every guarded call is refused.
 
-`perl` is the exception, on purpose. `strip-cmd.sh` degrades to the
-*unmodified* command when `perl` cannot run, so the predicates still see the
-raw text and a real fetch is still blocked. Returning empty instead would hit
-the same "nothing to inspect" exit; blocking every call would make an absent
-interpreter a hard outage. Neither trade is necessary.
+`perl` is the exception, on purpose. The reader gate splits a command into
+words with it, and falls back to a bare split when `perl` cannot run, so the
+gate still asks rather than going silent. Blocking every call instead would
+make an absent interpreter a hard outage.
 
-That distinction is why the mask guard decides what to match on
-*normalized* text. `strip-cmd.sh` masks the parts of a command that are
-data rather than an executed command — heredoc bodies and the values of
-prose-carrying flags like `--body` and `-m` — so writing a PR body or a
-commit message *about* `op read` is not treated as performing one. A
-region that can still execute is never masked: a flag value or bare
-heredoc body containing `$(…)` or backticks stays visible to the
-predicate, because that text does run. So does a body fed to an
-interpreter, wherever the interpreter sits on that line — before the
-operator (`python3 <<'EOF'`) or after it (`cat <<'EOF' | python3`) — or
-past it: a trailing `|` or `\` carries the opener onto the next line, and
-a heredoc inside a group goes wherever the group sends it, so the group's
-opener (`eval "$(`, `source <(`) and the closer that ends it after the body
-(`) | sh`) both count. A trailing `\` joins lines on either side of the
-heredoc too (`bash \` above `<<'EOF'`, `) \` above `| sh`), and a `case`
-arm's `)` is a pattern, not a group closer. The interpreter is recognised under the same
-respellings the predicates normalize (`| "sh"`, `| \bash`). An ordinary
-destination on the same line (`cat <<'EOF' > file`, `| tee file`) leaves
-the body masked and is preserved as written.
+**Nothing in a command is masked as data.** A heredoc body, a commit message
+or a PR body that names a guarded command is held to that command's rule,
+because whether the shell runs the text is not decided by where it sits. A
+later command can run a body from a variable (`read` then `eval`), a file
+(`> f` then `bash f`, `./f` or `source f`), a descriptor (`exec 3<<`) or a
+group whose output reaches a shell. A flag value can be the operand a shell
+runs (`bash -c -m "…"`) or the command word itself (`x=-m "cmd" args`). Which
+quote ends where depends on the comments, escapes and heredocs before it.
+Telling those apart takes a shell parser. The cost is a block or a prompt on
+text that only *describes* a guarded command: write that text with the Write
+tool and pass it by file (`git commit -F <file>`,
+`gh pr create --body-file <file>`).
 
 ### Respellings the predicates normalize
 
@@ -114,9 +106,7 @@ alone**, because that is the only thing separating a command that *performs*
 the fetch from one that *searches for the phrase*: without the exception,
 `grep -rn "op read" .` becomes a hard block with no approval path.
 
-Order matters twice. `strip_cmd()` masks prose first, so the placeholder left
-behind is a bare word and unwrapping quotes cannot re-expose a commit message.
-And normalization is not the universal widening it looks like: it widens a
+Normalization is not the universal widening it looks like: it widens a
 predicate that matches on words, but *narrows* one that matches on a quote
 character. `write-secret-guard-bash.sh` therefore scans the raw and the
 normalized spelling as two lines and takes either.
@@ -183,34 +173,29 @@ trailing `# see scripts/op-cache.sh` could claim it. Copy a wrapper out of the
 tree and it blocks, which is what keeps this an exemption for these files
 rather than for their contents.
 
-## Flag masking and filenames
+## Reader-gate words and filenames
 
-Masking a flag value is right for the mask guard, where the value is
-prose. It is wrong for the reader gate in
-`read-secret-guard-bash.sh`, where a short flag's value can be the very
-filename that gate exists to notice: `less -m` is a valid no-argument
-flag, so `less -m "secrets.pem"` is an ordinary read whose argument
-masking would hide. `-b` is left out of the masked set entirely for the
-same reason (`cat -b`).
-
-So the reader gate strips twice. It decides *whether the command is a
-read* from fully-masked text, which keeps a commit message mentioning
-`grep -r` from tripping it, and then scans for *filenames* in text where
-short flags are left intact. Long prose flags (`--body`, `--message`,
-`--title`, `--notes`, `--description`, `--comment`) are masked in both,
-since no reader command accepts them.
-
-The trade-off is one-directional: because `-m` survives into the scan, a
-prose `-m` value whose last word ends in `.pem`/`.key` can raise a prompt
-on a command that also begins with a reader. That costs a confirmation,
-never a missed read.
+The reader gate sees the command as written, flag values included, so a
+key file named as a word of its own asks wherever it sits once the
+command names a reader: `cat README.md && gh pr create --body ".env"`
+prompts. That costs a confirmation, never a missed read. A key inside a
+longer quoted string, such as `--body "cat .env notes"`, is part of one
+word and does not ask, as below.
 
 That gate also tokenizes with shell quoting rules rather than bare word
 splitting. Splitting on whitespace left quote characters attached, so
 `cat "secrets.pem"` never matched the basename patterns that
-`cat secrets.pem` did. Input it cannot parse — an unbalanced quote —
-falls back to a bare split with quotes removed, so the gate still asks
-rather than going silent.
+`cat secrets.pem` did. A `#` comment and each heredoc body are cut out
+first and tokenized as pieces of their own, never dropped: a quote inside
+one would otherwise pair with a quote in the code around it, and every
+command between the two would read as one quoted word. A piece it cannot
+parse — an unbalanced quote — falls back to a bare split of that piece
+with quotes removed, before redirects are split off, so the gate still
+asks rather than going silent and `cat<.env` still names `.env`. When
+the command as a whole, or any piece of it, will not parse, the bare
+split of the whole command is read first as well, as it was before
+pieces were cut out, so the cut never makes the gate ask less often
+than it did.
 
 Text the shell runs as a command line is split the way the shell splits
 it. An unquoted `|`, `;` or `&` ends a word, so `cat secrets.pem|head`
@@ -506,7 +491,10 @@ rather than typing one.
   those is not matched, and nothing here verifies that `op run` really does
   mask its subprocess's output. Each flag is looked for in the fetch's own
   `;`/`&`-delimited segment, so `op item get X && op-cache.sh --reveal <uri>`
-  is two commands and not a revealing item-get.
+  is two commands and not a revealing item-get. For `--reveal`, `--otp` and
+  `--no-masking` the segments are also cut a second way that leaves a quoted
+  `;`, `&` or newline alone, so a value such as `--title 'a;b'` cannot cut the
+  fetch off from its flag; either way of cutting can block.
 - `op document get` and `op inject` are allowed when their output has somewhere
   to go that is not the transcript: `--out-file`/`-o`, a stdout redirect, or a
   pipe. A pipe whose *consumer* prints the value — `op inject -i x | cat` — is
@@ -514,8 +502,13 @@ rather than typing one.
   text after an unquoted `#` is dropped as a comment, a redirect operator or
   output flag inside quotes is read as the argument it is, and the pipe has to be
   the fetch's own — one *feeding* `op` is not a destination for what `op` prints.
-  The check still reads flags rather than resolving a path, so it does not verify
-  that the named file is anywhere sensible.
+  The text after the fetch is read twice, once honouring backslash escapes, and
+  both readings need a destination, so an escaped quote does not end a quoted
+  run early and expose a `>` inside it. Every occurrence of the fetch in a
+  segment needs a destination of its own, so an `--out-file` inside a quoted
+  value that only names the fetch does not clear a real one later in the
+  segment. The check still reads flags rather than resolving a path, so it does
+  not verify that the named file is anywhere sensible.
 - Normalization covers every respelling that still spells the verb as adjacent
   words. A verb assembled at runtime from an expansion is not matched.
 - A `MultiEdit` value split so that no two fragments are adjacent in array order
@@ -540,14 +533,9 @@ rather than typing one.
 - The reader list in the ask gate is closed — `cat`, `head`, `tail`, `less`,
   `more`, `grep`. A file read by any other program does not reach the basename
   patterns.
-- The interpreter list that keeps a heredoc body visible is closed — `sh`,
-  `bash`, `zsh`, `ksh`, `dash`, `ash`, `csh`, `tcsh`, `mksh`, `fish`, `python`,
-  `perl`, `ruby`, `node`, `ssh`, `awk`, `xargs`, `env`, `eval`, and `source`
-  or `.` of `/dev/stdin` or `<(…)` — and a group is found by counting
-  parentheses and braces, not by parsing. A body handed to anything else
-  stays masked, as does one reached through a function called later
-  (`f() { cat <<'EOF' … }` then `f | sh`) or through a group that an
-  unbalanced quoted parenthesis hides.
+- Nothing is masked as data, so a runbook, commit message or PR body that
+  names a guarded command blocks or asks as if it ran it — see
+  [Failing closed](#failing-closed). Pass such text by file instead.
 - The reader gate splits a `$(…)` substitution but not a backtick one, so
   ``echo "`tail -c 64 server.key` done"`` is read as one word; Markdown code
   spans in a `python3 -` heredoc use the same character and would prompt.

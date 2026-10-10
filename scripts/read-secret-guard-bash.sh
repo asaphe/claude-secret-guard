@@ -16,19 +16,14 @@ fi
 
 # shellcheck source-path=SCRIPTDIR
 source "$(dirname "${BASH_SOURCE[0]}")/strip-cmd.sh"
-# Stripped twice: fully-masked text decides whether this is a read, while -m stays intact for the scan, where its value is a filename rather than prose — see README § Flag masking and filenames.
-GATE_CMD=$(strip_cmd "$CMD")
 
 # Matched anywhere inside a segment rather than after a fixed wrapper list, which would go silent on any prefix the list omits (timeout, nice, stdbuf, ionice, doas).
 SEP=$';&|()`"\''
 # Normalized like the mask guard's predicates, or a quoted reader name (`"cat" secrets.pem`) splits into its own segment with no trailing space and matches nothing.
-GATE_CMD=$(normalize_cmd "$GATE_CMD")
+GATE_CMD=$(normalize_cmd "$CMD")
 # A leading slash admits the same reader named by path, and grep carries no recursive-flag condition: -r decides how many files are read, never whether the one named is a key — see README § Why grep is gated unconditionally.
 printf '%s' "$GATE_CMD" | tr "$SEP" '\n' | grep -qE '(^|[[:space:]]|/)(cat|head|tail|less|more|grep)([[:space:]<]|$)' \
   || exit 0
-
-# Computed after the gate, not before: a non-read command is the common case and must not pay a second perl.
-SCAN_CMD=$(strip_cmd "$CMD" long-flags-only)
 
 ask() {
   jq -n --arg reason "$1" \
@@ -58,10 +53,69 @@ tokenize() {
     no warnings;
     use Text::ParseWords qw(shellwords);
     my $cmd = do { local $/; <STDIN> };
-    # Text the shell runs as a command line is split the way the shell splits it, and other quoted text, such as a grep or jq pattern, stays one word — see README § Flag masking and filenames.
-    my $tok;
-    $tok = sub {
-      my ($s, $depth) = @_;
+    # A comment and a heredoc body are cut out as pieces of their own, never dropped, and kept in text order: a quote inside one otherwise pairs with one in the code around it, and the find exemption reads tokens in sequence — see README § Reader-gate words and filenames.
+    my $pieces = sub {
+      my ($s) = @_;
+      my $code = "";
+      my (@out, @pend);
+      my ($st, $n) = (0, length $s);
+      for (my $i = 0; $i < $n; $i++) {
+        my $c = substr($s, $i, 1);
+        if ($st != 1 && $c eq chr(92)) { $code .= substr($s, $i++, 2); next }
+        if ($st == 0) {
+          if ($c eq "#" && ($i == 0 || substr($s, $i - 1, 1) =~ /[\s;&|()<>]/)) {
+            my $e = index($s, "\n", $i);
+            $e = $n if $e < 0;
+            push @out, ["code", $code], ["com", substr($s, $i, $e - $i)];
+            $code = "";
+            $i = $e - 1;
+            next;
+          }
+          if (substr($s, $i, 3) eq "<<<") { $code .= "<<<"; $i += 2; next }
+          pos($s) = $i;
+          if (substr($s, $i, 2) eq "<<" && $s =~ /\G<<(-?)[ \t]*((?:[^\s;&|<>()\\\x27"]|\\.|\x27[^\x27]*\x27|"[^"]*")+)/gc) {
+            my ($m, $strip, $d) = (substr($s, $i, pos($s) - $i), $1, $2);
+            $d =~ s/\\(.)/$1/g;
+            $d =~ s/["\x27]//g;
+            push @pend, [$d, $strip];
+            $code .= $m;
+            $i += length($m) - 1;
+            next;
+          }
+          if ($c eq "\n" && @pend) {
+            push @out, ["code", $code . $c];
+            $code = "";
+            my $p = $i + 1;
+            for my $h (@pend) {
+              my ($d, $strip, $body) = (@$h, "");
+              while ($p < $n) {
+                my $e = index($s, "\n", $p);
+                $e = $n - 1 if $e < 0;
+                my $line = substr($s, $p, $e - $p + 1);
+                $body .= $line;
+                $p = $e + 1;
+                $line =~ s/\n\z//;
+                $line =~ s/^\t+// if $strip;
+                last if $line eq $d;
+              }
+              push @out, ["bod", $body];
+            }
+            @pend = ();
+            $i = $p - 1;
+            next;
+          }
+          $st = 1 if $c eq "\x27";
+          $st = 2 if $c eq q{"};
+        } elsif ($st == 1) { $st = 0 if $c eq "\x27" }
+        else { $st = 0 if $c eq q{"} }
+        $code .= $c;
+      }
+      push @out, ["code", $code];
+      return grep { length $_->[1] } @out;
+    };
+    my $fell = 0;
+    my $split = sub {
+      my ($s) = @_;
       # An unquoted |, ; or & is an operator, not part of a word: cat k.pem|head names k.pem.
       my ($out, $st) = ("", 0);
       for (my $i = 0; $i < length($s); $i++) {
@@ -76,11 +130,26 @@ tokenize() {
         $out .= $c;
       }
       my @w = shellwords($out);
+      # Unbalanced quotes yield nothing; fall back to a bare split of this piece so the guard still asks rather than going silent.
+      unless (@w) { @w = map { my $t = $_; $t =~ s/["\x27]//g; $t } ($out =~ /\S+/g); $fell = 1 if @w }
+      return @w;
+    };
+    # Text the shell runs as a command line is split the way the shell splits it, and other quoted text, such as a grep or jq pattern, stays one word — see README § Reader-gate words and filenames.
+    my $tok;
+    $tok = sub {
+      my ($s, $depth) = @_;
+      my (@w, @own, @run);
+      for my $p ($pieces->($s)) {
+        my ($kind, $text) = @$p;
+        # A heredoc body is tokenized like any command line, since a shell may be what reads it; its own -c, eval and $(...) were followed in that call, so they are not followed again here.
+        my @pw = $kind eq "bod" && $depth <= 3 ? $tok->($text, $depth + 1) : $split->($text);
+        push @w, @pw;
+        push @own, ($kind ne "bod" || $depth > 3) x @pw;
+      }
       return @w if $depth > 3;
       # The operand of a shell -c or of eval and the body of a $(...) substitution are command lines too: bash -c "cat k.pem | head". The shell must own the -c, or a jq -c filter would be split; backticks are left whole because Markdown code spans in a python heredoc use the same character.
       my $SHELL = qr{(?:^|/)(?:ba|z|k|da|a|c|tc|mk|fi)?sh$};
-      my @run;
-      for my $i (0 .. $#w) {
+      for my $i (grep { $own[$_] } 0 .. $#w) {
         push @run, $tok->($w[$i], $depth + 1)
           if $i && (($w[$i - 1] =~ /^-[A-Za-z]*c[A-Za-z]*$/ && grep { $_ =~ $SHELL } @w[($i > 5 ? $i - 5 : 0) .. $i - 2]) || $w[$i - 1] =~ m{(?:^|/)eval$});
         push @run, $tok->($1, $depth + 1) while $w[$i] =~ /\$\(((?:[^()]++|\((?1)\))*)\)/g;
@@ -88,12 +157,14 @@ tokenize() {
       return (@w, @run);
     };
     my @w = $tok->($cmd, 0);
+    # An unbalanced quote used to expose every word through a bare split of the whole command, and with heredoc bodies masked that quote could sit anywhere, so the split stays, first and unaltered, whenever the whole or any piece will not parse.
+    my @whole = shellwords($cmd);
+    my @bare = (@whole && !$fell) ? () : map { my $t = $_; $t =~ s/["\x27]//g; $t } ($cmd =~ /\S+/g);
     # Punctuation survives tokenizing glued to the filename — $'"'"'…'"'"', substitution syntax, and a trailing ; or & each defeat the end-anchored suffix patterns.
     @w = map { my $t = $_; $t =~ s/^\$//; $t =~ s/[()`]//g; $t =~ s/[;&]+$//; $t } @w;
     # A redirect glues its target to the reader, and the basename patterns are anchored: cat<.env is one token that matches nothing.
     @w = grep { length } map { split /[<>]+/, $_ } @w;
-    # Unbalanced quotes yield nothing; fall back to a bare split so the guard still asks rather than going silent.
-    @w = map { my $t = $_; $t =~ s/["\x27]//g; $t } ($cmd =~ /\S+/g) unless @w;
+    @w = (@bare, @w);
     print join("\0", @w), "\0" if @w;
   '
 }
@@ -101,11 +172,11 @@ tokenize() {
 # Fails closed like the jq check above: with nowhere to tokenize into, no argument was ever inspected.
 TOKENS_FILE=$(mktemp) || ask "READ-SECRET GUARD: could not create the temporary file this gate tokenizes into, so the arguments of this read were never inspected — confirm before its contents enter context/transcript."
 trap 'rm -f "$TOKENS_FILE"' EXIT
-tokenize "$SCAN_CMD" >"$TOKENS_FILE" 2>/dev/null
+tokenize "$CMD" >"$TOKENS_FILE" 2>/dev/null
 # A missing perl empties this, which would make every read silent — fall back to a bare split so the gate still asks.
 if [ ! -s "$TOKENS_FILE" ]; then
   # The trailing newline is load-bearing: without it the final token has no NUL and `read -d ''` discards it at EOF.
-  { printf '%s' "$SCAN_CMD" | tr -d '"'"'"'' | tr -s ' \t\n<>' '\n'; printf '\n'; } | tr '\n' '\0' >"$TOKENS_FILE"
+  { printf '%s' "$CMD" | tr -d '"'"'"'' | tr -s ' \t\n<>' '\n'; printf '\n'; } | tr '\n' '\0' >"$TOKENS_FILE"
 fi
 
 # Matched with bash's own regex engine rather than a grep per test: this loop runs before every Bash call, and the forks it used to spend cost more than the scan it performs.

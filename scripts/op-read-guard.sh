@@ -36,9 +36,8 @@ fi
 
 # shellcheck source-path=SCRIPTDIR
 source "$(dirname "${BASH_SOURCE[0]}")/strip-cmd.sh"
-# Without this a commit message quoting a reference is recorded as a fetch, so the real fetch of it is later refused as a duplicate.
-CMD=$(strip_cmd "$CMD")
 # Same normalization the mask guard matches on, so `op "item" get` keys the same entry as `op item get` rather than fetching twice.
+RAW_CMD=${CMD//\\$'\n'/}
 CMD=$(normalize_cmd "$CMD")
 
 if ! printf '%s\n' "$CMD" | grep -qE '(^|[^[:alnum:]_-])op[[:space:]]([^|;&]* )?read([[:space:]]|$)'; then
@@ -47,10 +46,21 @@ if ! printf '%s\n' "$CMD" | grep -qE '(^|[^[:alnum:]_-])op[[:space:]]([^|;&]* )?
   fi
 fi
 
-# printf is named rather than xargs' default echo, whose GNU build reads --help/--version/-n as its own flags and rewrites the token stream; quoting rules still apply so a quoted --fields value stays one token, and unparseable input falls through to allow because secret-mask-guard is the security control ahead of this prompt-frequency gate.
+# printf is named rather than xargs' default echo, whose GNU build reads --help/--version/-n as its own flags and rewrites the token stream; quoting rules still apply so a quoted --fields value stays one token.
 # A newline terminates a command exactly as `;` does, but xargs flattens it away — without this the segments merge and a reference printed on one line keys a fetch on another; a trailing backslash is a continuation, so it gets no separator.
 SEGMENTED=$(printf '%s\n' "$CMD" | sed 's/\([^\\]\)$/\1 ;/')
-TOKENS=$(printf '%s\n' "$SEGMENTED" | xargs -n1 printf '%s\n' 2>/dev/null) || exit 0
+# One unbalanced quote fails the whole split: an apostrophe in a heredoc body or a comment, or one that unwrapping a pair such as '"' left behind. So the command as written is tried next, then each line on its own — normalized, as written, and bare only when both fail.
+if ! TOKENS=$(printf '%s\n' "$SEGMENTED" | xargs -n1 printf '%s\n' 2>/dev/null) \
+   && ! TOKENS=$(printf '%s\n' "$RAW_CMD" | sed 's/\([^\\]\)$/\1 ;/' | xargs -n1 printf '%s\n' 2>/dev/null); then
+  TOKENS=$(printf '%s\n' "$RAW_CMD" | while IFS= read -r LINE; do
+    LINE="$LINE ;"
+    NLINE=$(normalize_cmd "$LINE")
+    LINE_TOKENS=$(printf '%s\n' "$NLINE" | xargs -n1 printf '%s\n' 2>/dev/null) \
+      || LINE_TOKENS=$(printf '%s\n' "$LINE" | xargs -n1 printf '%s\n' 2>/dev/null) \
+      || LINE_TOKENS=$(printf '%s\n' "$NLINE" | tr -d '"'"'"'' | tr -s ' \t' '\n')
+    [ -n "$LINE_TOKENS" ] && printf '%s\n' "$LINE_TOKENS"
+  done)
+fi
 if [ -z "$TOKENS" ]; then
   exit 0
 fi
@@ -62,14 +72,32 @@ SEEN_GET=0
 PENDING=""
 SEG_URI=""
 SEG_OP=0
+KEYS=""
+WHATS=""
+
+# Appends the identity of the segment just read, as one line of KEYS and the matching line of WHATS.
+add_key() {
+  local uri norm
+  uri=$(printf '%s\n' "$SEG_URI" | grep -oE 'op://[^ "'"'"']+' | head -1)
+  if [ -n "$uri" ]; then
+    KEYS="${KEYS}uri|${ACCOUNT}|${uri}"$'\n'
+    WHATS="${WHATS}${uri}"$'\n'
+  elif [ -n "$ITEM" ]; then
+    # Sorted and deduplicated so the same fields requested in a different order are one identity, not two.
+    norm=$(printf '%s' "${FIELDS#,}" | tr ',' '\n' | sed '/^[[:space:]]*$/d' | sort -u | tr '\n' ',' | sed 's/,$//')
+    [ -n "$norm" ] || norm='(whole item)'
+    KEYS="${KEYS}item|${ACCOUNT}|${ITEM}|${norm}"$'\n'
+    WHATS="${WHATS}item ${ITEM} → ${norm}"$'\n'
+  fi
+}
 
 while IFS= read -r TOK; do
   # Shell punctuation is not an argument: without this, `op item get --help 2>&1 | head` records "2>&1" as the item name.
   case "$TOK" in
-    # Stop once a segment has produced identity, else restart: a reference form never sets ITEM, but a reference is only identity in a segment that actually invoked op — printed elsewhere it is text, and stopping there would key the whole command on a reference nobody fetched.
+    # Every segment that produced identity keys the command, not only the first: a heredoc or a message naming another read sits earlier on the line, and keying on it alone let the real duplicate after it through. A reference is identity only in a segment that actually invoked op — printed elsewhere it is text.
     '|'|';'|'&'|'&&'|'||')
-      if [ -n "$ITEM" ] || { [ -n "$SEG_URI" ] && [ "$SEG_OP" -eq 1 ]; }; then break; fi
-      ACCOUNT=""; FIELDS=""; SEEN_GET=0; PENDING=""; SEG_URI=""; SEG_OP=0
+      if [ -n "$ITEM" ] || { [ -n "$SEG_URI" ] && [ "$SEG_OP" -eq 1 ]; }; then add_key; fi
+      ACCOUNT=""; ITEM=""; FIELDS=""; SEEN_GET=0; PENDING=""; SEG_URI=""; SEG_OP=0
       continue ;;
     *'>'*|*'<'*) continue ;;
   esac
@@ -101,27 +129,15 @@ while IFS= read -r TOK; do
 done <<EOF
 $TOKENS
 EOF
+add_key
 
-# Scanning the whole command keys on the first reference that merely appears in it, so fall back to that only when the segment named neither a reference nor an item to key on.
-SCAN="$SEG_URI"
-[ -n "$SEG_URI" ] || [ -n "$ITEM" ] || SCAN="$CMD"
-URI=$(printf '%s\n' "$SCAN" | grep -oE 'op://[^ "'"'"']+' | head -1)
-
-if [ -n "$URI" ]; then
-  KEY="uri|${ACCOUNT}|${URI}"
-  WHAT="$URI"
-else
-  if [ -z "$ITEM" ]; then
-    exit 0
-  fi
-  # Sorted and deduplicated so the same fields requested in a different order are one identity, not two.
-  NORM=$(printf '%s' "${FIELDS#,}" | tr ',' '\n' | sed '/^[[:space:]]*$/d' | sort -u | tr '\n' ',' | sed 's/,$//')
-  if [ -z "$NORM" ]; then
-    NORM='(whole item)'
-  fi
-  KEY="item|${ACCOUNT}|${ITEM}|${NORM}"
-  WHAT="item ${ITEM} → ${NORM}"
+# Scanning the whole command keys on the first reference that merely appears in it, so fall back to that only when no segment named a reference or an item to key on.
+if [ -z "$KEYS" ]; then
+  SEG_URI="$CMD"
+  ITEM=""
+  add_key
 fi
+[ -n "$KEYS" ] || exit 0
 
 # shellcheck source-path=SCRIPTDIR
 source "$(dirname "${BASH_SOURCE[0]}")/session-namespace.sh"
@@ -147,7 +163,7 @@ record() {
   chmod 600 "$TRACK_FILE"
   # An interrupted append leaves no trailing newline, and concatenating onto that line makes both it and the new key unmatchable by the whole-line test below.
   [ -s "$TRACK_FILE" ] && [ -n "$(tail -c1 "$TRACK_FILE")" ] && printf '\n' >>"$TRACK_FILE"
-  printf '%s\n' "$KEY" >>"$TRACK_FILE"
+  printf '%s' "$KEYS" >>"$TRACK_FILE"
 }
 
 # Recording moved off PreToolUse: it ran before the command did, so a fetch the user then denied was still recorded, and the legitimate retry was refused as a duplicate of a read that never happened. PostToolUse only fires once the tool has actually run.
@@ -157,7 +173,14 @@ if [ "$HOOK_EVENT" = "PostToolUse" ]; then
 fi
 
 # Whole-line match: a substring match makes a shorter reference collide with a longer one recorded earlier.
-if [ -f "$TRACK_FILE" ] && grep -qxF "$KEY" "$TRACK_FILE"; then
+WHAT=""
+if [ -f "$TRACK_FILE" ]; then
+  while IFS= read -r KEY && IFS= read -r W <&3; do
+    [ -n "$KEY" ] || continue
+    if grep -qxF "$KEY" "$TRACK_FILE"; then WHAT=$W; break; fi
+  done <<<"$KEYS" 3<<<"$WHATS"
+fi
+if [ -n "$WHAT" ]; then
   echo "Duplicate op read: ${WHAT}. You already read this exact secret earlier in this session — reuse the value you got before, since each read triggers a biometric prompt. A different field of the same item counts as a separate secret and is allowed." >&2
   exit 2
 fi

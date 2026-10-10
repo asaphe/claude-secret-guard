@@ -92,7 +92,7 @@ run ALLOW "run leaves masking on"            "op run -- ./deploy.sh"
 run ALLOW "item get beside a wrapper reveal" "op $IG X --fields label=username && scripts/op-cache.sh --reveal $U"
 
 # --- a destination only counts when it is a file the transcript does not see ---
-# strip_cmd replaces a masked body with <<STRIPPED_HEREDOC>>, whose >> is not a redirect.
+# A heredoc feeding the command is its input, and its << is not a redirect to a file.
 run BLOCK "heredoc placeholder is not a redirect" "$(printf 'op inject <<EOF\nx\nEOF')"
 run BLOCK "quoted heredoc is not a redirect" "$(printf 'op inject <<%sEOF%s\nx\nEOF' "'" "'")"
 # >&N duplicates a descriptor rather than naming a file, and stderr reaches the transcript too.
@@ -108,6 +108,18 @@ run ALLOW "control: the 1> spelling"         "op inject -i x 1> /tmp/f"
 run ALLOW "out-file value contains inject"   "op $DG key --out-file inject.log"
 run ALLOW "inject out-file contains inject"  "op inject -i template --out-file inject.tpl"
 run BLOCK "control: same shape, no out-file" "op inject -i template.inject"
+# Every occurrence needs its own destination: an --out-file inside a quoted value that only names the fetch clears nothing else in the segment.
+run BLOCK "quoted out-file in a --body, real fetch after" "echo --body 'op $DG k --out-file /tmp/f' \"${SUB}op $DG real)\""
+run BLOCK "quoted out-file, real fetch after"   "echo 'op $DG k --out-file /tmp/f' \"${SUB}op $DG real)\""
+run BLOCK "a second fetch with no destination"  "op $DG a --out-file /tmp/a | op inject -i t"
+run ALLOW "two fetches, each with a destination" "op $DG a --out-file /tmp/a | op inject -i t > /tmp/b"
+# An escaped quote does not end a quoted run, so a > after it inside the string is not a redirect.
+run BLOCK "escaped quote, then a quoted >"      "op $DG X ${SUB}printf %.0s --body \"\\\" > /tmp/f\")"
+run BLOCK "the same for inject"                 "op inject -i t ${SUB}printf %.0s --body \"\\\" > /tmp/f\")"
+# A quoted ; or newline inside a value does not cut a fetch off from its own flag.
+run BLOCK "quoted ; between item get and --reveal" "op $IG X ${SUB}printf %.0s --title 'a;b') --reveal"
+run BLOCK "quoted newline between them"         "op $IG X --title 'a"$'\n'"b' --reveal"
+run BLOCK "quoted ; between run and --no-masking" "op run ${SUB}printf %.0s --title 'a;b') --no-masking -- env"
 run BLOCK "op read with intermediate flags"  "op $R --account example.1password.com $U"
 run BLOCK "after a semicolon"                "git status; op $R $U"
 run BLOCK "after a pipe"                     "printf x | op $R $U"
@@ -129,21 +141,18 @@ run BLOCK "get-secret-value with flags"      "aws --profile prod $SM get-secret-
 run BLOCK "batch-get-secret-value"           "aws $SM batch-get-secret-value --secret-id-list a b"
 run BLOCK "get-secret-value in substitution" "X=${SUB}aws $SM get-secret-value --secret-id my-secret)"
 
-# --- prose that merely names the pattern must be allowed ---
-run ALLOW "--body describing op read"        "gh pr create --title t --body \"Use the wrapper instead of op $R $U\""
-run ALLOW "--body describing get-secret"     "gh issue comment 5 --body \"the guard blocks aws $SM get-secret-value calls\""
-run ALLOW "-m describing op read"            "git commit -m \"docs: explain why op $R $U is blocked\""
-run ALLOW "--title describing op read"       "gh pr create --title \"block op $R calls\" --body \"see docs\""
-run ALLOW "--notes describing op read"       "gh release create v1 --notes \"no longer calls op $R here\""
-run ALLOW "quoted heredoc of prose"          "cat > doc.md <<'EOF'
-never call op $R $U directly
-EOF"
+# --- a flag value is never masked: whether the program runs its own argument is not decided from the command line ---
+run BLOCK "--body describing op read"        "gh pr create --title t --body \"Use the wrapper instead of op $R $U\""
+run BLOCK "--body describing get-secret"     "gh issue comment 5 --body \"the guard blocks aws $SM get-secret-value calls\""
+run BLOCK "-m describing op read"            "git commit -m \"docs: explain why op $R $U is blocked\""
+run BLOCK "--title describing op read"       "gh pr create --title \"block op $R calls\" --body \"see docs\""
+run BLOCK "--notes describing op read"       "gh release create v1 --notes \"no longer calls op $R here\""
 
-# --- prose masking must not hide a read that actually runs ---
+# --- a substitution in a flag value runs ---
 run BLOCK "-m whose value substitutes"       "git commit -m \"token ${SUB}op $R $U)\""
 run BLOCK "-m whose value uses backticks"    "git commit -m \"token \`op $R $U\`\""
 run BLOCK "--body whose value substitutes"   "gh pr create --body \"token ${SUB}op $R $U)\""
-run ALLOW "-m single-quoted cannot expand"   "git commit -m 'the literal ${SUB}op $R $U) in prose'"
+run BLOCK "-m single-quoted, not masked either" "git commit -m 'the literal ${SUB}op $R $U) in prose'"
 run BLOCK "bare heredoc that substitutes"    "cat > f.txt <<EOF
 value=${SUB}op $R $U)
 EOF"
@@ -183,16 +192,56 @@ run BLOCK "quoted paren then case before the closer" "(cat <<'EOF'${NL}op $R $U$
 run BLOCK "substitution then case word before the closer" "(cat <<'EOF'${NL}op $R $U${NL}EOF${NL}echo ${SUB}date) case y in b${NL}) | sh"
 run BLOCK "array then case word before the closer" "(cat <<'EOF'${NL}op $R $U${NL}EOF${NL}a=(1 2) case in${NL}) | sh"
 run BLOCK "case word after ;; in quotes before the closer" "(cat <<'EOF'${NL}op $R $U${NL}EOF${NL}echo \"x;; case in y\"${NL}) | sh"
-# The same body stays masked where nothing runs it, or every commit message and runbook naming a fetch would block.
-run ALLOW "heredoc redirected to a file"     "cat <<'EOF' > f.txt${NL}op $R $U${NL}EOF"
-run ALLOW "heredoc piped to grep"            "cat <<'EOF' | grep x${NL}op $R $U${NL}EOF"
-run ALLOW "group redirected to a file"       "(cat <<'EOF'${NL}op $R $U${NL}EOF${NL}) > notes.txt"
-run ALLOW "message substitution, then a shell" "git commit -m \"${SUB}cat <<'EOF'${NL}op $R $U${NL}EOF${NL})\" && bash deploy.sh"
-run ALLOW "case arm after a data heredoc"    "cat <<'EOF' > f.txt${NL}op $R $U${NL}EOF${NL}case x in a) bash y ;; esac"
-run ALLOW "case arm inside a data group"     "(cat <<'EOF' > notes.txt${NL}op $R $U${NL}EOF${NL}case x in${NL}  a) bash y ;;${NL}esac${NL})"
-run ALLOW "parenthesized case arm in a data group" "(cat <<'EOF' > notes.txt${NL}op $R $U${NL}EOF${NL}case x in (a) bash y ;; esac${NL})"
-run ALLOW "nested case arm in a data group"  "(cat <<'EOF' > notes.txt${NL}op $R $U${NL}EOF${NL}case x in a) case y in b) bash z ;; esac ;; esac${NL})"
-run ALLOW "prose closer inside a later body" "(cat <<'A' > a.md${NL}op $R $U${NL}A${NL}cat <<'B' > b.md${NL}2) ssh in${NL}B${NL})"
+# A body is never masked, even where nothing visibly runs it: a later command can run it from a variable, a file or a descriptor, and telling which takes a shell parser.
+run BLOCK "quoted heredoc of prose"          "cat > doc.md <<'EOF'${NL}never call op $R $U directly${NL}EOF"
+run BLOCK "heredoc redirected to a file"     "cat <<'EOF' > f.txt${NL}op $R $U${NL}EOF"
+run BLOCK "heredoc piped to grep"            "cat <<'EOF' | grep x${NL}op $R $U${NL}EOF"
+run BLOCK "case arm after a data heredoc"    "cat <<'EOF' > f.txt${NL}op $R $U${NL}EOF${NL}case x in a) bash y ;; esac"
+run BLOCK "body read into a variable, then eval" "read -r -d '' x <<'EOF'${NL}op $R $U${NL}EOF${NL}eval \"\$x\""
+run BLOCK "opener in a comment, then eval"   "# eval (${NL}read -r -d '' x <<'EOF'${NL}op $R $U${NL}EOF${NL}eval \"\$x\""
+run BLOCK "descriptor with a leading zero"   "exec 03<<'EOF'${NL}op $R $U${NL}EOF${NL}source /dev/fd/3"
+run BLOCK "descriptor bash allocates"        "exec {fd}<<'EOF'${NL}op $R $U${NL}EOF${NL}source /dev/fd/\$fd"
+run BLOCK "source -- /dev/stdin"             "source -- /dev/stdin <<'EOF'${NL}op $R $U${NL}EOF"
+run BLOCK "stdin replaced, then sourced"     "exec 0<<'EOF'${NL}op $R $U${NL}EOF${NL}source /dev/stdin"
+run BLOCK "variable run through a here-string" "read -r x <<'EOF'${NL}op $R $U${NL}EOF${NL}bash <<< \"\$x\""
+run BLOCK "file without an extension, run later" "cat <<'EOF' > f${NL}op $R $U${NL}EOF${NL}bash f"
+run BLOCK "file named through a variable"    "f=f.sh; cat <<'EOF' >\"\$f\"${NL}op $R $U${NL}EOF${NL}bash \"\$f\""
+run BLOCK "file run by path"                 "cat <<'EOF' > f${NL}op $R $U${NL}EOF${NL}chmod +x f; ./f"
+run BLOCK "file sourced"                     "cat <<'EOF' > f${NL}op $R $U${NL}EOF${NL}source f"
+run BLOCK "marker inside a comment"          "# <<X${NL}(cat <<Y${NL}op $R $U${NL}Y${NL}) | bash${NL}X="
+
+# --- a heredoc inside a group stays visible like any other ---
+run BLOCK "group redirected to a file"       "(cat <<'EOF'${NL}op $R $U${NL}EOF${NL}) > notes.txt"
+run BLOCK "case arm inside a data group"     "(cat <<'EOF' > notes.txt${NL}op $R $U${NL}EOF${NL}case x in${NL}  a) bash y ;;${NL}esac${NL})"
+run BLOCK "parenthesized case arm in a data group" "(cat <<'EOF' > notes.txt${NL}op $R $U${NL}EOF${NL}case x in (a) bash y ;; esac${NL})"
+run BLOCK "nested case arm in a data group"  "(cat <<'EOF' > notes.txt${NL}op $R $U${NL}EOF${NL}case x in a) case y in b) bash z ;; esac ;; esac${NL})"
+run BLOCK "prose closer inside a later body" "(cat <<'A' > a.md${NL}op $R $U${NL}A${NL}cat <<'B' > b.md${NL}2) ssh in${NL}B${NL})"
+run BLOCK "comment apostrophes around a case arm" "(cat <<'EOF'${NL}op $R $U${NL}EOF${NL}# don't${NL}case x in a) true ;; esac${NL}# won't${NL}) | sh"
+run BLOCK "escaped apostrophe before a case arm" "(cat <<'EOF'${NL}op $R $U${NL}EOF${NL}echo don\\'t${NL}case x in a) true ;; esac${NL}echo 'ok'${NL}) | sh"
+run BLOCK "comment apostrophe hiding esac"    "(cat <<'EOF'${NL}op $R $U${NL}EOF${NL}case x in a) true ;; # it's${NL}esac${NL}echo 'x' >&2${NL}) | sh"
+run BLOCK "comment apostrophe above an opener" "case x in a) true ;; # it's${NL}esac; echo 'y' >&2${NL}eval ${SUB}${NL}cat <<'EOF'${NL}op $R $U${NL}EOF${NL})"
+run BLOCK "case arm then quoted case prose"  "(cat <<'EOF'${NL}op $R $U${NL}EOF${NL}case x in a) true ;; esac${NL}echo \"see; case in point\"${NL}) | sh"
+run BLOCK "nested quotes in a substitution"  "echo \"${SUB}cat <<'EOF'${NL}op $R $U${NL}EOF${NL}echo \"(\"${NL}case x in a) case y in b) true ;; esac ;; esac${NL})\" | sh"
+run BLOCK "function body piped later"        "f() { cat <<'EOF'${NL}op $R $U${NL}EOF${NL}}; f | sh"
+run BLOCK "brace group piped to a shell"     "{ cat <<'EOF'${NL}op $R $U${NL}EOF${NL}echo ')'${NL}} | sh"
+run BLOCK "message substitution, then a shell" "git commit -m \"${SUB}cat <<'EOF'${NL}op $R $U${NL}EOF${NL})\" && bash deploy.sh"
+run BLOCK "commit message naming a fetch"    "git commit -m \"${SUB}cat <<'EOF'${NL}docs: never call op $R $U${NL}EOF${NL})\""
+run BLOCK "commit message in an outer group" "( git commit -m \"${SUB}cat <<'EOF'${NL}op $R $U${NL}EOF${NL})\" ) | sh"
+run BLOCK "outer group closed on a later line" "( git commit -m \"${SUB}cat <<'EOF'${NL}op $R $U${NL}EOF${NL})\"${NL}) | sh"
+run BLOCK "backtick substitution piped to a shell" "echo \`cat <<'EOF'${NL}op $R $U${NL}EOF${NL}\` | sh"
+run BLOCK "commit-message shape piped to a shell" "echo \"${SUB}cat <<'EOF'${NL}op $R $U${NL}EOF${NL})\" | sh"
+run BLOCK "commit-message shape, closer line continued" "echo \"${SUB}cat <<'EOF'${NL}op $R $U${NL}EOF${NL})\" \\${NL}| sh"
+run BLOCK "commit-message shape written to a file, then run" "echo \"${SUB}cat <<'EOF'${NL}op $R $U${NL}EOF${NL})\" > run.sh; bash run.sh"
+run BLOCK "heredoc on another descriptor, sourced later" "exec 3<<'EOF'${NL}op $R $U${NL}EOF${NL}source /dev/fd/3"
+run BLOCK "heredoc marker inside a comment before the closer" "eval \"${SUB}${NL}cat <<'EOF'${NL}op $R $U${NL}EOF${NL}# <<true${NL})\"${NL}true"
+run BLOCK "substitution assigned, then run"  "x=\"${SUB}cat <<'EOF'${NL}op $R $U${NL}EOF${NL})\"${NL}eval \"\$x\""
+
+# --- flag values that masking used to hide although the shell ran them ---
+run BLOCK "-m after a shell's -c"            "bash -c -m \"op $R $U\""
+run BLOCK "flag glued to an assignment"      "x=-m \"op\" $R $U"
+run BLOCK "apostrophe in a comment before a flag" "# don't${NL}echo 'a -m \"' ; op $R $U ; echo '\"'"
+run BLOCK "escaped quote before a flag"      "echo don\\'t${NL}echo 'a -m \"' ; op $R $U ; echo '\"'"
+run BLOCK "apostrophe in a heredoc before a flag" "python3 <<'EOF'${NL}# don't${NL}EOF${NL}echo 'a -m \"' ; op $R $U ; echo '\"'"
 
 # --- exemptions ---
 run ALLOW "op item get is not a mask target" "op item get ABC --account example.1password.com --fields 'Client ID'"
@@ -329,7 +378,7 @@ run BLOCK "control: op's own global flag"    "op --account acme $R $U"
 
 run_without perl BLOCK "perl unavailable, real read" "op $R $U"
 run_without jq   BLOCK "jq unavailable, real read"   "op $R $U"
-# The other half of that trade: strip_cmd degrades to the unmodified command rather than to empty, so an ordinary command must still pass without perl instead of every Bash call becoming a block.
+# The other half of that trade: the mask guard does not need perl, so an ordinary command must still pass without it instead of every Bash call becoming a block.
 run_without perl ALLOW "perl unavailable, benign command" "ls -la"
 run_without perl ALLOW "perl unavailable, git status"     "git status"
 run_without perl ALLOW "perl unavailable, an echo"        "echo hi"
