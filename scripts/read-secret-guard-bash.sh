@@ -146,7 +146,6 @@ tokenize() {
       unless (@w) { @w = map { my $t = $_; $t =~ s/["\x27]//g; $t } ($out =~ /\S+/g); $fell = 1 if @w }
       return @w;
     };
-    # Text the shell runs as a command line is split the way the shell splits it, and other quoted text, such as a grep or jq pattern, stays one word — see README § Reader-gate words and filenames.
     # A body is text, not a command, only when the whole command is data sinks fed by heredocs plus mkdir: nothing in it can pipe, substitute, group, run or source what a sink wrote, so the routes a later command takes to run a body are absent — see README § Heredoc bodies written as data.
     my $data = 0;
     {
@@ -194,6 +193,7 @@ tokenize() {
       }
       $data = 1 if $ok && $ops == $bods;
     }
+    # Text the shell runs as a command line is split the way the shell splits it, and other quoted text, such as a grep or jq pattern, stays one word — see README § Reader-gate words and filenames.
     my $tok;
     $tok = sub {
       my ($s, $depth, $ctx) = @_;
