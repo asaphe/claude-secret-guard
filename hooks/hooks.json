@@ -6,7 +6,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}\"/scripts/paste-secret-guard.sh"
+            "command": "\"${CLAUDE_PLUGIN_ROOT}\"/scripts/paste-secret-guard.sh",
+            "timeout": 30
           }
         ]
       }
@@ -17,7 +18,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}\"/scripts/read-secret-guard.sh"
+            "command": "\"${CLAUDE_PLUGIN_ROOT}\"/scripts/read-secret-guard.sh",
+            "timeout": 30
           }
         ]
       },
@@ -26,7 +28,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}\"/scripts/write-secret-guard.sh"
+            "command": "\"${CLAUDE_PLUGIN_ROOT}\"/scripts/write-secret-guard.sh",
+            "timeout": 30
           }
         ]
       },
@@ -35,7 +38,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}\"/scripts/bash-secret-authority.sh"
+            "command": "\"${CLAUDE_PLUGIN_ROOT}\"/scripts/bash-secret-authority.sh",
+            "timeout": 30
           }
         ]
       }
@@ -46,7 +50,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}\"/scripts/op-read-guard.sh"
+            "command": "\"${CLAUDE_PLUGIN_ROOT}\"/scripts/op-read-guard.sh",
+            "timeout": 30
           }
         ]
       }
@@ -57,7 +62,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}\"/scripts/op-cache-cleanup.sh"
+            "command": "\"${CLAUDE_PLUGIN_ROOT}\"/scripts/op-cache-cleanup.sh",
+            "timeout": 30
           }
         ]
       }

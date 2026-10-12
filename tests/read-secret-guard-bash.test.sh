@@ -112,8 +112,34 @@ run ASK    "pipe to csh"                         "cat <<'EOF' | csh${NL}cat $PEM
 run ASK    "pipe to tcsh"                        "cat <<'EOF' | tcsh${NL}cat $PEM${NL}EOF"
 run ASK    "pipe to fish"                        "cat <<'EOF' | fish${NL}cat $PEM${NL}EOF"
 run ASK    "pipe to mksh"                        "cat <<'EOF' | mksh${NL}cat $PEM${NL}EOF"
-# A body is never masked, even where nothing visibly runs it: a later command can run it from a variable, a file or a descriptor.
-run ASK    "heredoc redirected to a file"        "cat <<'EOF' > f.txt${NL}cat $PEM${NL}EOF"
+# A body fed to a data sink is text, but only when nothing else in the command could run what the sink wrote — see README § Heredoc bodies written as data.
+run SILENT "heredoc written to a file by cat"    "cat <<'EOF' > f.txt${NL}cat $PEM${NL}EOF"
+run SILENT "reported: prose glob appended by cat" "cat >> \"/tmp/x/notes/verify.md\" <<'EOF'${NL}## Ownership${NL}- src/router/** @example-org/team-a (.github/CODEOWNERS:404 at 4e65f3e3eb; report cited :385 at its head).${NL}- Downstream consumer src/mesh/** @example-org/team-b (CODEOWNERS:459)${NL}EOF"
+run SILENT "an apostrophe in a data body"        "cat > notes.md <<'EOF'${NL}can't cat .env${NL}EOF"
+run SILENT "mkdir, then a body written by cat"   "mkdir -p out && cat > out/n.md <<'EOF'${NL}cat .env${NL}EOF"
+run SILENT "body appended by tee"                "tee -a notes.md >/dev/null <<'EOF'${NL}grep x secrets/*.pem${NL}EOF"
+run SILENT "commit message read from stdin"      "git commit -F - <<'EOF'${NL}fix grep over .env files${NL}EOF"
+run SILENT "PR body read from stdin"             "gh pr create --title t --body-file - <<'EOF'${NL}run cat $PEM to check${NL}EOF"
+# The same sinks stay strict whenever anything could run, pipe or substitute the body, or the consumer is not one of them.
+run ASK    "data body, then the file is run"     "cat <<'EOF' > f.txt${NL}cat $PEM${NL}EOF${NL}bash f.txt"
+run ASK    "data body, then the file is sourced" "cat > f.sh <<'EOF'${NL}cat $PEM${NL}EOF${NL}. f.sh"
+run ASK    "data body, then the file executes"   "cat > f.sh <<'EOF'${NL}cat $PEM${NL}EOF${NL}chmod +x f.sh && ./f.sh"
+run ASK    "unquoted delimiter expands the body" "cat > f.txt <<EOF${NL}\$(cat $PEM)${NL}EOF"
+run ASK    "a shell after a semicolon on the opener" "cat > f.sh <<'EOF'; bash f.sh${NL}cat $PEM${NL}EOF"
+run ASK    "a brace group, then the file is run" "{ cat > f.sh <<'EOF'${NL}cat $PEM${NL}EOF${NL}} ; bash f.sh"
+run ASK    "a body held in a variable, then eval" "read -r -d '' X <<'EOF'${NL}cat $PEM${NL}EOF${NL}eval \"\$X\""
+run ASK    "a body on a descriptor, then read"   "exec 3<<'EOF'${NL}cat $PEM${NL}EOF${NL}cat <&3"
+run ASK    "git config before commit"            "git -c core.x=1 commit -F - <<'EOF'${NL}cat $PEM${NL}EOF"
+run ASK    "data body to a descriptor"           "cat <<'EOF' >&3${NL}cat $PEM${NL}EOF"
+run ASK    "data body to a process substitution" "cat <<'EOF' > >(bash)${NL}cat $PEM${NL}EOF"
+run ASK    "cat with no redirect"                "cat <<'EOF'${NL}cat $PEM${NL}EOF"
+run ASK    "a cat named by a relative path"      "./cat > f.txt <<'EOF'${NL}cat $PEM${NL}EOF"
+run ASK    "an assignment before the sink"       "X=1 cat > f.txt <<'EOF'${NL}cat $PEM${NL}EOF"
+run ASK    "git commit reading a file, not stdin" "git commit -F msg.txt <<'EOF'${NL}cat $PEM${NL}EOF${NL}bash msg.txt"
+run ASK    "gh api is not a body sink"           "gh api -F body=@- <<'EOF'${NL}cat $PEM${NL}EOF"
+run ASK    "shell reading a quoted-delimiter body" "bash <<'EOF'${NL}cat secrets/*.pem${NL}EOF"
+run ASK    "python shelling out to a reader"     "python3 - <<'EOF'${NL}import os; os.system(\"cat k.pem\")${NL}EOF"
+run ASK    "cat body piped to bash"              "cat <<'EOF' | bash${NL}cat k.pem${NL}EOF"
 run ASK    "heredoc piped to grep"               "cat <<'EOF' | grep x${NL}cat $PEM${NL}EOF"
 run ASK "group redirected to a file"          "(cat <<'EOF'${NL}cat $PEM${NL}EOF${NL}) > notes.txt"
 run ASK "message substitution, then a shell"  "git commit -m \"\$(cat <<'EOF'${NL}cat $PEM${NL}EOF${NL})\" && bash deploy.sh"
@@ -307,6 +333,15 @@ says "absolute glob names the filenames" "cat $GLOBDIR/*"          "$PEM"
 says "absolute glob matching nothing"    "cat $GLOBDIR/nonesuch/*" "matches nothing under that path right now"
 # A relative pattern says why it cannot be expanded rather than implying the guard knows more than it does.
 says "relative glob is not expanded"     'cat *'                   "working directory is not the command's"
+# Every prompt names the word, where it sits, and what approving lets happen.
+BT='`'
+says "names the flagged word"            "cat .env"                                    "flagged ${BT}.env${BT} in the command line"
+says "names a body and its consumer"     "cat <<'EOF' | grep x${NL}cat $PEM${NL}EOF"   "flagged ${BT}$PEM${BT} in the heredoc body fed to ${BT}cat${BT}"
+says "names where a piped body goes"     "cat <<'EOF' | bash${NL}cat $PEM${NL}EOF"   "the heredoc body fed to ${BT}cat${BT}, piped on to ${BT}bash${BT}"
+says "names a shell -c operand"          "bash -c 'cat $KEY; true'"                    "in the command line passed to a shell ${BT}-c${BT}"
+says "names a comment"                   "cat notes.txt # $PEM"                        'in a shell comment'
+says "names a substitution"              "echo \"\$(cat $PEM) done\""                  'in a command substitution'
+says "says what approving lets happen"   "cat .env"                                    'Approving runs the command as written: if it does read the file, its contents enter the context/transcript'
 # Naming a match must never mean reading one: the prompt carries filenames, never contents. A plain sentinel rather than a secret-shaped literal — this asserts that contents do not travel, which no particular shape makes truer.
 printf 'CONTENTS-MUST-NOT-TRAVEL\n' > "$GLOBDIR/$KEY"
 case "$(reason "cat $GLOBDIR/*")" in

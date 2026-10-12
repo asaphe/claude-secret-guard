@@ -86,7 +86,9 @@ quote ends where depends on the comments, escapes and heredocs before it.
 Telling those apart takes a shell parser. The cost is a block or a prompt on
 text that only *describes* a guarded command: write that text with the Write
 tool and pass it by file (`git commit -F <file>`,
-`gh pr create --body-file <file>`).
+`gh pr create --body-file <file>`). The reader gate has one narrow
+exception, for a command that is nothing but heredocs written to data
+sinks — see [Heredoc bodies written as data](#heredoc-bodies-written-as-data).
 
 ### Respellings the predicates normalize
 
@@ -220,6 +222,56 @@ directory is not necessarily the one the command will run in, and a
 verdict that depends on it is not reproducible. An unresolved pattern is
 judged by what it could match instead: `cat *`, `cat .env*` and
 `cat .ssh/*` all ask, while `cat *.log` does not.
+
+### Heredoc bodies written as data
+
+`cat >> notes.md <<'EOF'` followed by prose that names `python/**` or
+`.env` used to ask as if `cat` were reading those words, and the prompt
+gave the approver no way to see that nothing reads them. The reader gate
+now skips a heredoc body's words when, and only when, the **whole
+command** has this shape:
+
+- Every command in it is either a data sink fed by exactly one heredoc,
+  or `mkdir`. The sinks are `cat` (bare, `/bin/cat` or `/usr/bin/cat`)
+  with nothing but one `>` or `>>` redirect to a file; `tee` with only
+  `-a` and file operands, optionally redirected to a file;
+  `git [-C dir] commit` reading its message with `-F -`/`--file=-`; and
+  `gh pr|issue create|comment|edit|review` reading `--body-file -`/`-F -`.
+- Every heredoc delimiter is quoted (`<<'EOF'`, `<<"EOF"`), because an
+  unquoted one expands the body and runs any `$(…)` in it before the sink
+  sees the text.
+- The command text outside the bodies holds no `|`, lone `&`, `(`, `)`,
+  `{`, `}`, backtick or backslash, so nothing pipes a body onward,
+  substitutes it, groups it with a later reader of its output, sends it to
+  a descriptor or a process substitution, or continues a line.
+
+Commands are separated only by line breaks, `;` and `&&`. Anything else —
+a shell, `eval`, `source`/`.`, `./f`, an interpreter, an assignment
+prefix, `exec 3<<`, `read … <<`, `git -c`, `gh api`, any unknown command —
+keeps the whole command on the strict path, where every body is read as a
+command line as before. That is what keeps each route in
+[Failing closed](#failing-closed) shut: a body written to `f` and then run
+by `bash f`, `. f` or `./f` in the same command, held in a variable for
+`eval`, or put on a descriptor, all still ask. The comment, delimiter-line
+and code words around a skipped body are still scanned.
+
+What the exception cannot see is a run that happens *outside* the
+command: a later Bash call that executes the file, a sink writing to a
+file something else executes on its own (`~/.bashrc`, a git hook, a FIFO
+a background shell reads). That is the same reach the Write tool already
+has, and the recommended "write it to a file, pass it by file" workaround
+has the same property.
+
+### What a reader-gate prompt says
+
+Every prompt names the flagged word, where it sits — the command line, a
+heredoc body and the command it is fed to, a shell `-c` operand, an
+`eval` operand, a `$(…)` substitution, a comment, or the bare split of a
+command that did not parse — and what approving lets happen: the command
+runs as written, and if it does read that file, its contents enter the
+context/transcript. The approver's question becomes "is this word a file
+the command reads?", which they can answer from the command in front of
+them.
 
 ### What an unresolved glob prompt says
 
@@ -551,7 +603,13 @@ rather than typing one.
   patterns.
 - Nothing is masked as data, so a runbook, commit message or PR body that
   names a guarded command blocks or asks as if it ran it — see
-  [Failing closed](#failing-closed). Pass such text by file instead.
+  [Failing closed](#failing-closed). Pass such text by file instead. The
+  reader gate alone skips a quoted-delimiter heredoc fed to a data sink in
+  a command that does nothing else — see
+  [Heredoc bodies written as data](#heredoc-bodies-written-as-data).
+- The reader gate arms only on a reader word, so a file opened by an
+  interpreter's own API (`python3 - <<'EOF'` then `open("k.pem")`) is not
+  seen; a reader the body shells out to (`os.system("cat k.pem")`) is.
 - The reader gate splits a `$(…)` substitution but not a backtick one, so
   ``echo "`tail -c 64 server.key` done"`` is read as one word; Markdown code
   spans in a `python3 -` heredoc use the same character and would prompt.

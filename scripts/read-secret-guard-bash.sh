@@ -77,17 +77,24 @@ tokenize() {
             my ($m, $strip, $d) = (substr($s, $i, pos($s) - $i), $1, $2);
             $d =~ s/\\(.)/$1/g;
             $d =~ s/["\x27]//g;
-            push @pend, [$d, $strip];
+            # The command word the body is fed to, named in the prompt only; the verdict never trusts it — see the data-sink check below.
+            my ($who) = $code =~ /([^;&|()\n`]*)\z/;
+            ($who) = $who =~ /^\s*(\S+)/;
+            $who = "" unless defined $who;
+            $who =~ s/["\x27\\]//g;
+            push @pend, [$d, $strip, $who];
             $code .= $m;
             $i += length($m) - 1;
             next;
           }
           if ($c eq "\n" && @pend) {
+            # A pipe on the opener line is where the body really goes, so the prompt names that consumer too.
+            if ($code =~ /<<[^\n]*\|\s*["\x27\\]*([^\s"\x27\\;&|()]+)[^\n]*\z/) { my $to = $1; $_->[2] .= "`, piped on to `$to" for grep { length $_->[2] } @pend }
             push @out, ["code", $code . $c];
             $code = "";
             my $p = $i + 1;
             for my $h (@pend) {
-              my ($d, $strip, $body) = (@$h, "");
+              my ($d, $strip, $who, $body) = (@$h, "");
               while ($p < $n) {
                 my $e = index($s, "\n", $p);
                 $e = $n - 1 if $e < 0;
@@ -99,7 +106,7 @@ tokenize() {
                 last if $line eq $d;
                 push @extra, substr($line, length $d) if length($d) && length($line) > length($d) && substr($line, 0, length $d) eq $d;
               }
-              push @out, ["bod", $body], map { ["com", $_] } @extra;
+              push @out, ["bod", $body, $who], map { ["com", $_] } @extra;
               @extra = ();
             }
             @pend = ();
@@ -140,35 +147,86 @@ tokenize() {
       return @w;
     };
     # Text the shell runs as a command line is split the way the shell splits it, and other quoted text, such as a grep or jq pattern, stays one word — see README § Reader-gate words and filenames.
+    # A body is text, not a command, only when the whole command is data sinks fed by heredocs plus mkdir: nothing in it can pipe, substitute, group, run or source what a sink wrote, so the routes a later command takes to run a body are absent — see README § Heredoc bodies written as data.
+    my $data = 0;
+    {
+      my @top = $pieces->($cmd);
+      my $bods = grep { $_->[0] eq "bod" } @top;
+      last unless $bods;
+      my $code = join "", map { $_->[0] eq "code" ? $_->[1] : "" } @top;
+      last if $code =~ /[`\\(){}|]/;
+      # An unquoted delimiter expands the body, so a $(...) in it runs before the sink ever sees the text.
+      my $quoted = () = $code =~ /<<-?[ \t]*["\x27]/g;
+      last unless $quoted == $bods;
+      $code =~ s/&&/\n/g;
+      last if $code =~ /&/;
+      my ($ok, $ops) = (1, 0);
+      for my $line (split /[\n;]/, $code) {
+        next unless $line =~ /\S/;
+        my @a = shellwords($line);
+        unless (@a) { $ok = 0; last }
+        if ($a[0] eq "mkdir") { $ok = 0 if grep { /^[<>]/ } @a; last unless $ok; next }
+        my @h = grep { /^<</ } @a;
+        unless (@h == 1 && $h[0] =~ /^<<-?(?:\w[\w.-]*)?$/) { $ok = 0; last }
+        my @r;
+        for (my $j = 1; $j < @a; $j++) {
+          if ($a[$j] =~ /^<<-?$/) { $j++; next }
+          next if $a[$j] =~ /^<</;
+          push @r, $a[$j] =~ /^(>>?)([^>].*)$/ ? ($1, $2) : $a[$j];
+        }
+        my $dest = sub { defined $_[0] && length $_[0] && $_[0] !~ /^[&<>|]/ };
+        my $stdin = sub { my ($flag, @args) = @_; my $s = " " . join(" ", @args) . " "; $s =~ / (?:$flag) - / || $s =~ / --(?:body-)?file=- / };
+        my $good = 0;
+        if ($a[0] =~ m{^(?:(?:/usr)?/bin/)?cat$}) {
+          $good = @r == 2 && $r[0] =~ /^>>?$/ && $dest->($r[1]);
+        } elsif ($a[0] =~ m{^(?:(?:/usr)?/bin/)?tee$}) {
+          splice(@r, -2) if @r >= 2 && $r[-2] =~ /^>>?$/ && $dest->($r[-1]);
+          $good = !grep { /^-/ ? !/^(?:-a|--append)$/ : !$dest->($_) } @r;
+        } elsif ($a[0] eq "git") {
+          my $k = 0;
+          $k += 2 while defined $r[$k] && $r[$k] eq "-C";
+          $good = defined $r[$k] && $r[$k] eq "commit" && !grep({ /^[<>]/ } @r) && $stdin->("-F|--file", @r[$k + 1 .. $#r]);
+        } elsif ($a[0] eq "gh") {
+          $good = @r >= 2 && $r[0] =~ /^(?:pr|issue)$/ && $r[1] =~ /^(?:create|comment|edit|review)$/ && !grep({ /^[<>]/ } @r) && $stdin->("-F|--body-file", @r[2 .. $#r]);
+        }
+        unless ($good) { $ok = 0; last }
+        $ops++;
+      }
+      $data = 1 if $ok && $ops == $bods;
+    }
     my $tok;
     $tok = sub {
-      my ($s, $depth) = @_;
+      my ($s, $depth, $ctx) = @_;
       my (@w, @own, @run);
       for my $p ($pieces->($s)) {
-        my ($kind, $text) = @$p;
+        my ($kind, $text, $who) = @$p;
+        # A \x04 word names where the words after it sit, for the prompt only; it never reaches the patterns or the find window.
+        my $where = $kind eq "bod" ? (length $who ? "the heredoc body fed to `$who`" : "a heredoc body") : $kind eq "com" ? "a shell comment" : $ctx;
+        if ($kind eq "bod" && $data) { push @w, "\x01"; push @own, 0; next }
         # A heredoc body is tokenized like any command line, since a shell may be what reads it, at the same depth because each body is shorter than its parent; its own -c, eval and $(...) were followed in that call, and the marker after it keeps a find inside it from exempting anything later.
-        my @pw = $kind eq "bod" ? ($tok->($text, $depth), "\x01") : $kind eq "com" ? ($split->($text), "\x01") : $split->($text);
-        push @w, @pw;
-        push @own, ($kind ne "bod") x @pw;
+        my @pw = $kind eq "bod" ? ($tok->($text, $depth, $where), "\x01") : $kind eq "com" ? ($split->($text), "\x01") : $split->($text);
+        push @w, "\x04$where", @pw;
+        push @own, 0, ($kind ne "bod") x @pw;
       }
       return @w if $depth > 3;
       # The operand of a shell -c or of eval and the body of a $(...) substitution are command lines too: bash -c "cat k.pem | head". The shell must own the -c, or a jq -c filter would be split; backticks are left whole because Markdown code spans in a python heredoc use the same character.
       my $SHELL = qr{(?:^|/)(?:ba|z|k|da|a|c|tc|mk|fi)?sh$};
       for my $i (grep { $own[$_] } 0 .. $#w) {
-        push @run, "\x01", $tok->($w[$i], $depth + 1)
+        push @run, "\x01", $tok->($w[$i], $depth + 1, $w[$i - 1] =~ /eval$/ ? "the command line run by `eval`" : "the command line passed to a shell `-c`")
           if $i && (($w[$i - 1] =~ /^-[A-Za-z]*c[A-Za-z]*$/ && grep { $_ =~ $SHELL } @w[($i > 5 ? $i - 5 : 0) .. $i - 2]) || $w[$i - 1] =~ m{(?:^|/)eval$});
-        push @run, "\x01", $tok->($1, $depth + 1) while $w[$i] =~ /\$\(((?:[^()]++|\((?1)\))*)\)/g;
+        push @run, "\x01", $tok->($1, $depth + 1, "a command substitution `\$(...)`") while $w[$i] =~ /\$\(((?:[^()]++|\((?1)\))*)\)/g;
       }
       return (@w, @run);
     };
-    my @w = $tok->($cmd, 0);
-    # An unbalanced quote used to expose every word through a bare split of the whole command, and with heredoc bodies masked that quote could sit anywhere, so the split stays, first and unaltered, whenever the whole or any piece will not parse.
-    my @whole = shellwords($cmd);
-    my @bare = (@whole && !$fell) ? () : ("\x02", (map { my $t = $_; $t =~ s/["\x27]//g; $t } ($cmd =~ /\S+/g)), "\x01");
+    my @w = $tok->($cmd, 0, "the command line");
+    # An unbalanced quote used to expose every word through a bare split of the whole command, and with heredoc bodies masked that quote could sit anywhere, so the split stays, first and unaltered, whenever the whole or any piece will not parse. A body passed as data is left out of it, as it is out of the pieces.
+    my $scan = $data ? join("", map { $_->[0] eq "bod" ? "\n" : $_->[1] } $pieces->($cmd)) : $cmd;
+    my @whole = shellwords($scan);
+    my @bare = (@whole && !$fell) ? () : ("\x02", (map { my $t = $_; $t =~ s/["\x27]//g; $t } ($scan =~ /\S+/g)), "\x01");
     # Punctuation survives tokenizing glued to the filename — $'"'"'…'"'"', substitution syntax, and a trailing ; or & each defeat the end-anchored suffix patterns.
-    @w = map { my $t = $_; my @end = $t =~ /[)`][;&]*$/ ? ("\x03") : (); $t =~ s/^\$//; $t =~ s/[()`]//g; $t =~ s/[;&]+$// unless $t =~ /^[;&|]+$/; $t =~ s/\$+$//; ($t, @end) } @w;
+    @w = map { my $t = $_; /^\x04/ ? $t : do { my @end = $t =~ /[)`][;&]*$/ ? ("\x03") : (); $t =~ s/^\$//; $t =~ s/[()`]//g; $t =~ s/[;&]+$// unless $t =~ /^[;&|]+$/; $t =~ s/\$+$//; ($t, @end) } } @w;
     # A redirect glues its target to the reader, and the basename patterns are anchored: cat<.env is one token that matches nothing.
-    @w = grep { length } map { split /[<>]+/, $_ } @w;
+    @w = grep { length } map { /^\x04/ ? $_ : split /[<>]+/, $_ } @w;
     @w = (@bare, @w);
     print join("\0", @w), "\0" if @w;
   '
@@ -203,13 +261,21 @@ NO_EXEMPT=""
 PREV=""
 PREV2=""
 PREV3=""
+# Where the flagged word sits, for the prompt only; the no-perl fallback carries no markers, so it keeps this default.
+WHERE="the command"
+
+# One wording for every hit, so the approver always learns which word, where it sits, and what approving lets happen — see README § What a reader-gate prompt says.
+ask_read() {  # ask_read <word> <what it looks like>
+  ask "READ-SECRET GUARD: flagged \`$1\` in $WHERE — $2. The guard cannot tell whether this command reads that file or only mentions the name as text. Approving runs the command as written: if it does read the file, its contents enter the context/transcript. Approve only if \`$1\` is not a file this command reads."
+}
 
 while IFS= read -r -d '' token; do
-  # \001 starts a command; \002 opens the whole-command bare split, read with no exemption so that text 0.6.5 masked cannot widen it there; \003 closes a substitution, whose next word is an argument, not a command.
+  # \001 starts a command; \002 opens the whole-command bare split, read with no exemption so that text 0.6.5 masked cannot widen it there; \003 closes a substitution, whose next word is an argument, not a command; \004 names where the words after it sit.
   case "$token" in
     $'\001') FIND_ACTIVE=""; PREV=""; PREV2=""; PREV3=""; NO_EXEMPT=""; continue ;;
-    $'\002') NO_EXEMPT=1; continue ;;
+    $'\002') NO_EXEMPT=1; WHERE="the command read word by word (it did not parse cleanly, so text is checked too)"; continue ;;
     $'\003') FIND_ACTIVE=""; PREV=$'\003'; PREV2=""; PREV3=""; continue ;;
+    $'\004'*) WHERE=${token#?}; continue ;;
   esac
   # A SINGLY negated find predicate whose operand is a WILDCARD can only SHRINK the set of files touched, so it is never a read target; a second negation makes it positive again and a literal operand is indistinguishable from a filename — see README § Why a negated find predicate is exempt.
   if [ -n "$FIND_ACTIVE" ] && [ -z "$NO_EXEMPT" ] \
@@ -236,14 +302,14 @@ while IFS= read -r -d '' token; do
   BASENAME=${BASENAME##*/}
   # A glob is not expanded here, so judge the pattern by what it could match rather than by the hook's cwd, which is not necessarily the command's.
   if [[ $token =~ $RE_GLOB ]] && { [[ $BASENAME =~ $RE_GLOB_SECRET ]] || [[ $token =~ $RE_SSH_GLOB ]]; }; then
-    ask "READ-SECRET GUARD: $token is an unresolved glob that could match a secret file — $(describe_glob "$token"). Confirm before its contents enter context/transcript."
+    ask_read "$token" "an unresolved wildcard that could match a secret file; $(describe_glob "$token")"
   fi
   if [[ $BASENAME =~ $RE_ENV ]] && [[ ! $BASENAME =~ $RE_ENV_SAMPLE ]]; then
-    ask "READ-SECRET GUARD: $BASENAME looks like a live env file — confirm before its contents enter context/transcript."
+    ask_read "$token" "it looks like a live env file, which usually holds secrets"
   fi
   # Case-insensitive throughout: the matchers name files, and the filesystem this runs on is usually case-insensitive too.
   if [[ $BASENAME =~ $RE_KEY_NAME ]] || [[ $token =~ $RE_KEY_PATH ]]; then
-    ask "READ-SECRET GUARD: $BASENAME looks like a private key or kubeconfig — confirm before its contents enter context/transcript."
+    ask_read "$token" "it looks like a private key or kubeconfig"
   fi
 done <"$TOKENS_FILE"
 
