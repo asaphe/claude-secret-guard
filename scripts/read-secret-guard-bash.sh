@@ -75,6 +75,8 @@ tokenize() {
           pos($s) = $i;
           if (substr($s, $i, 2) eq "<<" && $s =~ /\G<<(-?)[ \t]*((?:[^\s;&|<>()\\\x27"]|\\.|\x27[^\x27]*\x27|"[^"]*")+)/gc) {
             my ($m, $strip, $d) = (substr($s, $i, pos($s) - $i), $1, $2);
+            # Any quote or backslash in the delimiter word itself stops the shell expanding the body; this word, not text elsewhere, is what decides it.
+            my $q = $d =~ /["\x27\\]/ ? 1 : 0;
             $d =~ s/\\(.)/$1/g;
             $d =~ s/["\x27]//g;
             # The command word the body is fed to, named in the prompt only; the verdict never trusts it — see the data-sink check below.
@@ -82,7 +84,7 @@ tokenize() {
             ($who) = $who =~ /^\s*(\S+)/;
             $who = "" unless defined $who;
             $who =~ s/["\x27\\]//g;
-            push @pend, [$d, $strip, $who];
+            push @pend, [$d, $strip, $who, $q];
             $code .= $m;
             $i += length($m) - 1;
             next;
@@ -94,7 +96,7 @@ tokenize() {
             $code = "";
             my $p = $i + 1;
             for my $h (@pend) {
-              my ($d, $strip, $who, $body) = (@$h, "");
+              my ($d, $strip, $who, $q, $body) = (@$h, "");
               while ($p < $n) {
                 my $e = index($s, "\n", $p);
                 $e = $n - 1 if $e < 0;
@@ -106,7 +108,7 @@ tokenize() {
                 last if $line eq $d;
                 push @extra, substr($line, length $d) if length($d) && length($line) > length($d) && substr($line, 0, length $d) eq $d;
               }
-              push @out, ["bod", $body, $who], map { ["com", $_] } @extra;
+              push @out, ["bod", $body, $who, $q], map { ["com", $_] } @extra;
               @extra = ();
             }
             @pend = ();
@@ -155,8 +157,7 @@ tokenize() {
       my $code = join "", map { $_->[0] eq "code" ? $_->[1] : "" } @top;
       last if $code =~ /[`\\(){}|]/;
       # An unquoted delimiter expands the body, so a $(...) in it runs before the sink ever sees the text.
-      my $quoted = () = $code =~ /<<-?[ \t]*["\x27]/g;
-      last unless $quoted == $bods;
+      last if grep { $_->[0] eq "bod" && !$_->[3] } @top;
       $code =~ s/&&/\n/g;
       last if $code =~ /&/;
       my ($ok, $ops) = (1, 0);
