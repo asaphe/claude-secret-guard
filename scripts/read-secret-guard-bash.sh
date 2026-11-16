@@ -174,7 +174,8 @@ tokenize() {
       return 0 unless $reader =~ /$INTERPRETER/ || $reader =~ m{^(?:(?:/usr)?/bin/)?(?:cat|tee)$};
       my @opener = $split->($p->[4]);
       return 0 unless 1 == grep { /^<</ } @opener;
-      my (@pipeline, @part);
+      my (@pipeline, @part, @segments);
+      my $piped = 0;
       my $interpreted_pipeline = sub {
         my ($body, $interpreted) = (0, 0);
         for my $part (@pipeline) {
@@ -188,29 +189,31 @@ tokenize() {
       };
       for my $word (@opener, ";") {
         if ($word =~ /^(?:[;&|]+|\x01)$/) {
-          push @pipeline, [@part] if @part;
+          if (@part) { push @pipeline, [@part]; push @segments, [@part] }
           @part = ();
           unless ($word eq "|") {
-            return 1 if $interpreted_pipeline->();
+            $piped = 1 if $interpreted_pipeline->();
             @pipeline = ();
           }
         } else { push @part, $word }
       }
-      return 0 unless $p->[2] =~ m{^(?:(?:/usr)?/bin/)?(?:cat|tee)$};
-      my @a = shellwords($p->[4]);
+      return 0 unless $piped || $p->[2] =~ m{^(?:(?:/usr)?/bin/)?(?:cat|tee)$};
       my @dest;
-      for (my $i = 0; $i < @a; $i++) {
-        push @dest, $1 if $a[$i] =~ /^>>?([^>].*)$/;
-        push @dest, $a[$i + 1] if $a[$i] =~ /^>>?$/ && defined $a[$i + 1];
-      }
-      if ($p->[2] =~ /tee$/) {
-        for (my $i = 1; $i < @a; $i++) {
-          if ($a[$i] =~ /^(?:<<-?|>>?)$/) { $i++; next }
-          next if $a[$i] =~ /^[<>-]/;
-          push @dest, $a[$i];
+      for my $segment (@segments) {
+        my @a = @$segment;
+        for (my $i = 0; $i < @a; $i++) {
+          push @dest, $1 if $a[$i] =~ /^>>?([^>].*)$/;
+          push @dest, $a[$i + 1] if $a[$i] =~ /^>>?$/ && defined $a[$i + 1];
+        }
+        if ($a[0] =~ m{^(?:(?:/usr)?/bin/)?tee$}) {
+          for (my $i = 1; $i < @a; $i++) {
+            if ($a[$i] =~ /^(?:<<-?|>>?)$/) { $i++; next }
+            next if $a[$i] =~ /^[<>-]/;
+            push @dest, $a[$i];
+          }
         }
       }
-      return 0 unless @dest;
+      return 0 unless $piped || @dest;
       my $later = $p->[4] . "\n" . join "", map { $_->[0] eq "code" ? $_->[1] : "" } $pieces->($p->[5]);
       return 0 if $later =~ /[()`{}\\]/;
       $later =~ s/\$(?=["\x27])//g;
@@ -220,6 +223,7 @@ tokenize() {
       my ($matched, $unsafe) = (0, 0);
       my $executes = sub {
         return unless @segment;
+        return if $segment[0] =~ m{^(?:(?:/usr)?/bin/)?tee$};
         return if $segment[0] =~ m{^(?:(?:/usr)?/bin/)?(?:cat|tee)$} && grep { /^<</ } @segment;
         for my $dest (@dest) {
           my ($base) = $dest =~ m{([^/]+)$};
@@ -235,7 +239,7 @@ tokenize() {
           @segment = ();
         } else { push @segment, $word }
       }
-      return $matched && !$unsafe;
+      return ($piped || $matched) && !$unsafe;
     };
     # A body is text, not a command, only when the whole command is data sinks fed by heredocs plus mkdir: nothing in it can pipe, substitute, group, run or source what a sink wrote, so the routes a later command takes to run a body are absent — see README § Heredoc bodies written as data.
     my $data = 0;
