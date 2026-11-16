@@ -8,6 +8,9 @@ GUARD="$(cd "$(dirname "$0")/../scripts" && pwd)/read-secret-guard-bash.sh"
 
 pass=0
 fail=0
+WORK=$(mktemp -d) || exit 1
+trap 'rm -rf "$WORK"' EXIT
+export HOOK_DIAG_ASK_LOG="$WORK/asks.log"
 
 decide() {  # decide <command-text> -> ASK | SILENT
   local out
@@ -95,6 +98,47 @@ run ASK    "heredoc body naming a file"       "$(printf 'cat <<EOF\n%s\nEOF' "$P
 
 # --- a heredoc body a shell runs is a command, however the shell reaches it ---
 NL=$'\n'
+for interpreter in python python3 python3.12 node perl ruby; do
+  run SILENT "$interpreter heredoc ignores a secret-shaped glob" "cat notes.txt; $interpreter - <<'EOF'${NL}cat *.pem${NL}EOF"
+  run ASK "$interpreter heredoc retains a literal key" "cat notes.txt; $interpreter - <<'EOF'${NL}cat secrets.pem${NL}EOF"
+  run SILENT "cat piped to $interpreter ignores globs" "cat <<'EOF' | $interpreter${NL}cat .env*${NL}EOF"
+  run SILENT "file subsequently run by $interpreter" "cat > A.py <<'EOF'${NL}cat *.pem${NL}EOF${NL}$interpreter A.py"
+done
+run SILENT "reported: write Python, change directory, isolated run" "cat > \$S/A.py <<'EOF'${NL}paths = list(root.glob('*'))${NL}EOF${NL}cd \$S; python3 -I A.py"
+run SILENT "written Python body ignores secret-shaped globs" "cat > \$S/A.py <<'EOF'${NL}cat .env*${NL}EOF${NL}cd \$S; python3 -I A.py"
+run SILENT "tee writes a subsequently interpreted file" "tee A.py <<'EOF'${NL}cat *.key${NL}EOF${NL}python3 A.py"
+run SILENT "apostrophe fallback retains the interpreter mode" "cat > A.py <<'EOF'${NL}# can't cat *.pem${NL}EOF${NL}python3 A.py"
+run SILENT "unquoted interpreter body without substitutions" "cat notes.txt; python3 - <<EOF${NL}cat *.pem${NL}EOF"
+run ASK "expanding interpreter body runs shell substitutions" "cat notes.txt; python3 - <<EOF${NL}\$(cat *.pem)${NL}EOF"
+run ASK "shell heredoc retains secret-shaped globs" "cat <<'EOF' | bash${NL}cat *.pem${NL}EOF"
+run ASK "written shell retains globs despite another interpreter" "cat > A.py <<'EOF'${NL}cat *.pem${NL}EOF${NL}python3 A.py; bash A.py"
+run ASK "an unrelated interpreter cannot vouch for a written file" "cat > A.py <<'EOF'${NL}cat *.pem${NL}EOF${NL}python3 B.py"
+run ASK "interpreter named as prose is not an execution" "cat > A.py <<'EOF'${NL}cat *.pem${NL}EOF${NL}echo python3 A.py"
+run ASK "unknown consumer retains wildcard checks" "cat <<'EOF' | custom-reader${NL}cat *.pem${NL}EOF"
+run ASK "an unterminated interpreter heredoc stays strict" "cat notes.txt; python3 - <<'EOF'${NL}cat *.pem"
+run ASK "interpreter mode ends before a shell glob" "cat <<'EOF' | python3${NL}cat *.pem${NL}EOF${NL}cat .env*"
+run ASK "written interpreter retains literal dotenv" "cat > A.py <<'EOF'${NL}cat .env.prod${NL}EOF${NL}python3 A.py"
+run ASK "written interpreter retains literal kubeconfig" "cat > A.py <<'EOF'${NL}cat kubeconfig${NL}EOF${NL}python3 A.py"
+run ASK "quoted shell after the interpreter keeps the body strict" "cat > A.py <<'EOF'${NL}cat *.pem${NL}EOF${NL}python3 A.py; \$'bash' A.py"
+run ASK "unknown file consumer beside an interpreter" "cat > A.py <<'EOF'${NL}cat *.pem${NL}EOF${NL}custom-reader A.py; python3 A.py"
+run ASK "shell on the opener line keeps the body strict" "cat > A.py <<'EOF'; bash A.py${NL}cat *.pem${NL}EOF${NL}python3 A.py"
+run SILENT "quoted substitution text remains interpreter data" "cat notes.txt; python3 - <<'EOF'${NL}message = \"\$(cat *.pem)\"${NL}EOF"
+MARKERS=$'\004\005'
+run ASK "input cannot supply interpreter-mode markers" "cat '${MARKERS}fake' *.pem"
+run ASK "a variable command is an unknown file consumer" "cat > A.py <<'EOF'${NL}cat *.pem${NL}EOF${NL}\$python A.py; python3 A.py"
+run ASK "shell before an interpreter consumes the body first" "bash <<'EOF' | python3${NL}cat *.pem${NL}EOF"
+run ASK "shell between a sink and an interpreter stays strict" "cat <<'EOF' | bash | python3${NL}cat *.pem${NL}EOF"
+run ASK "unknown consumer before an interpreter stays strict" "cat <<'EOF' | custom-reader | python3${NL}cat *.pem${NL}EOF"
+run ASK "interpreter output sent to a shell stays strict" "cat notes.txt; python3 - <<'EOF' | bash${NL}cat *.pem${NL}EOF"
+run ASK "two opener heredocs cannot share a consumer classification" "bash <<'A'; cat <<'B' | python3${NL}cat *.pem${NL}A${NL}print(0)${NL}B"
+run SILENT "tee in an interpreter pipeline keeps wildcard data" "cat <<'EOF' | tee A.py | python3${NL}cat *.pem${NL}EOF"
+run SILENT "tee owns an interpreter pipeline without a later consumer" "tee A.py <<'EOF' | python3${NL}cat *.pem${NL}EOF"
+run ASK "piped body copied by tee is later run by bash" "cat <<'EOF' | tee A.py | python3${NL}cat *.pem${NL}EOF${NL}bash A.py"
+run ASK "piped body copied by tee is later sourced" "cat <<'EOF' | tee A.py | python3${NL}cat *.pem${NL}EOF${NL}source A.py"
+run ASK "piped body owned by tee is later run by bash" "tee A.py <<'EOF' | python3${NL}cat *.pem${NL}EOF${NL}bash A.py"
+run ASK "piped body redirected by cat is later run by bash" "cat > A.py <<'EOF' | python3${NL}cat *.pem${NL}EOF${NL}bash A.py"
+run ASK "piped body copied by tee has an unknown later consumer" "cat <<'EOF' | tee A.py | python3${NL}cat *.pem${NL}EOF${NL}custom-reader A.py"
+run ASK "piped body retains literal checks" "cat <<'EOF' | tee A.py | python3${NL}cat .env.prod${NL}EOF"
 run ASK    "eval of a heredoc substitution"      "eval \"\$(cat <<'EOF'${NL}cat $PEM${NL}EOF${NL})\""
 run ASK    "eval opened on the line above"       "eval \"\$(${NL}cat <<'EOF'${NL}cat $PEM${NL}EOF${NL})\""
 run ASK    "substitution echoed into sh"         "echo \"\$(cat <<'EOF'${NL}cat $PEM${NL}EOF${NL})\" | sh"
@@ -241,11 +285,24 @@ run SILENT "non-reader command"               "ls -la"
 run SILENT "empty command"                    ""
 
 # --- globs are judged by pattern, not expanded against the cwd -----------------
-run ASK "bare wildcard could match anything"  "cat *"
+run SILENT "bare wildcard has no secret stem" "cat *"
+run SILENT "bare question mark has no secret stem" "cat ?"
+run SILENT "git pathspec excludes tests" "git grep foo -- ':!**/tests/**'"
+run SILENT "virtualenv pathspec has no secret stem" "git grep foo -- '**/.venv/**'"
+run SILENT "scratch listing" "ls *"
+run SILENT "listing after a reader" "cat README.md; ls *"
+run ASK "absolute Downloads pem glob" 'cat ~/Downloads/*.pem'
+run ASK "literal production dotenv" "cat .env.prod"
 run ASK "dotenv prefix wildcard"              "cat .env*"
 run ASK "wildcard inside .ssh"                "cat .ssh/*"
 run ASK "wildcard with a key suffix"          "cat *.pem"
+run ASK "secret glob is case-insensitive" "cat *.PEM"
+run ASK "secret glob after a tab separator" $'cat\t*.pem'
+run ASK "question mark retains an SSH stem" "cat id_?"
 run SILENT "wildcard that cannot match a secret" "cat *.log"
+for pattern in '*.key' '*.p12' '*.pfx' '.env.*' 'id_*' '*kubeconfig*' '.kube/config*' '.ssh/known*'; do
+  run ASK "derived secret stem: $pattern" "cat $pattern"
+done
 
 # --- the reader need not be the first word --------------------------------------
 run ASK "reader after a semicolon"            "true; cat $PEM"
@@ -265,8 +322,8 @@ run ASK "dash-prefixed pem after --"          "cat -- -$PEM"
 run ASK "dash-prefixed dotenv after --"       "tail -- -.env"
 
 # The verdict must not depend on the cwd, and this arm needs a control that can fail.
-GLOBDIR=$(mktemp -d "${TMPDIR:-/tmp}/read-guard-glob.XXXXXX")
-trap 'rm -rf "$GLOBDIR"' EXIT
+GLOBDIR="$WORK/glob"
+mkdir "$GLOBDIR"
 : > "$GLOBDIR/$PEM"
 check_from_globdir() {
   local expect="$1" label="$2" cmd="$3" actual
@@ -281,6 +338,8 @@ check_from_globdir() {
 }
 check_from_globdir ASK    "positive control from the glob cwd" "cat $PEM"
 check_from_globdir SILENT "harmless glob beside a real pem"    "cat *.log"
+check_from_globdir SILENT "scratch listing beside a real pem" "ls *"
+check_from_globdir SILENT "broad glob beside a real pem" "cat *"
 
 # --- a negated find predicate is a pattern that excludes, never a file that is read -------------
 run SILENT "not -path exclusion glob"          "find . -name x.md -not -path '*/.git/*' | head -2"
@@ -332,11 +391,11 @@ says() {
 
 # GLOBDIR is absolute and already holds one pem, so its expansion here is the one the command would get.
 : > "$GLOBDIR/id_rsa"
-says "absolute glob names its matches"   "cat $GLOBDIR/*"          "it matches 2 file(s)"
-says "absolute glob names the filenames" "cat $GLOBDIR/*"          "$PEM"
-says "absolute glob matching nothing"    "cat $GLOBDIR/nonesuch/*" "matches nothing under that path right now"
+says "absolute glob names its matches"   "cat $GLOBDIR/*.pem"          "it matches 1 file(s)"
+says "absolute glob names the filenames" "cat $GLOBDIR/*.pem"          "$PEM"
+says "absolute glob matching nothing"    "cat $GLOBDIR/nonesuch/*.pem" "matches nothing under that path right now"
 # A relative pattern says why it cannot be expanded rather than implying the guard knows more than it does.
-says "relative glob is not expanded"     'cat *'                   "working directory is not the command's"
+says "relative glob is not expanded"     'cat *.pem'                   "working directory is not the command's"
 # Every prompt names the word, where it sits, and what approving lets happen.
 BT='`'
 says "names the flagged word"            "cat .env"                                    "flagged ${BT}.env${BT} in the command line"
@@ -348,10 +407,38 @@ says "names a substitution"              "echo \"\$(cat $PEM) done\""           
 says "says what approving lets happen"   "cat .env"                                    'Approving runs the command as written: if it does read the file, its contents enter the context/transcript'
 # Naming a match must never mean reading one: the prompt carries filenames, never contents. A plain sentinel rather than a secret-shaped literal — this asserts that contents do not travel, which no particular shape makes truer.
 printf 'CONTENTS-MUST-NOT-TRAVEL\n' > "$GLOBDIR/$KEY"
-case "$(reason "cat $GLOBDIR/*")" in
+case "$(reason "cat $GLOBDIR/*.key")" in
   *CONTENTS-MUST-NOT-TRAVEL*) printf 'FAIL prompt leaked file contents\n'; fail=$((fail + 1)) ;;
   *) printf 'ok   prompt carries names, not contents\n'; pass=$((pass + 1)) ;;
 esac
+
+: >"$HOOK_DIAG_ASK_LOG"
+LOG_CMD="cat .env.prod${NL}# ts=forged${NL}---${NL}hook=forged"
+jq -nc --arg c "$LOG_CMD" '{session_id:"probe-123!",tool_input:{command:$c}}' | bash "$GUARD" >"$WORK/out"
+EXPECTED_LOG=$(printf '%s\n' '---' 'hook=read-secret-guard-bash' 'session=probe-123' 'decision=ask:literal' 'cmd=cat .env.prod # ts=forged --- hook=forged')
+if [ "$(sed '2d' "$HOOK_DIAG_ASK_LOG")" = "$EXPECTED_LOG" ] \
+  && sed -n '2p' "$HOOK_DIAG_ASK_LOG" | grep -qE '^ts=[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$'; then
+  printf 'ok   ask logging has six ordered, newline-free fields\n'; pass=$((pass + 1))
+else
+  printf 'FAIL malformed ask decision log\n'; fail=$((fail + 1))
+fi
+run ASK "wildcard ask is logged separately" "cat *.pem"
+if tail -2 "$HOOK_DIAG_ASK_LOG" | head -1 | grep -qx 'decision=ask:wildcard'; then
+  printf 'ok   wildcard decision class is recorded\n'; pass=$((pass + 1))
+else
+  printf 'FAIL wildcard ask log lost its decision class\n'; fail=$((fail + 1))
+fi
+if HOOK_DIAG_ASK_LOG="$WORK" decide 'cat *.pem' | grep -qx ASK; then
+  printf 'ok   ask logging does not alter verdicts\n'; pass=$((pass + 1))
+else
+  printf 'FAIL ask log changed the permission verdict\n'; fail=$((fail + 1))
+fi
+printf 'not json' | bash "$GUARD" >"$WORK/out" 2>"$WORK/err"
+if [ "$?" -eq 2 ] && grep -q 'cannot read the hook payload' "$WORK/err"; then
+  printf 'ok   unparsable input fails closed\n'; pass=$((pass + 1))
+else
+  printf 'FAIL unparsable input did not fail closed\n'; fail=$((fail + 1))
+fi
 
 # --- the authority must carry this guard's exit code, not just its stdout ---
 # Only stdout was read, so the reader's own fail-closed branch reached the caller as a plain allow. Stubbed rather than provoked, because every earlier stage refuses the same unreadable payload first and would exit before this one runs.
