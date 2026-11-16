@@ -220,8 +220,12 @@ far more common spelling.
 Globs are not expanded for the *verdict*, since the hook's working
 directory is not necessarily the one the command will run in, and a
 verdict that depends on it is not reproducible. An unresolved pattern is
-judged by what it could match instead: `cat *`, `cat .env*` and
-`cat .ssh/*` all ask, while `cat *.log` does not.
+judged by its secret-like stem instead: `cat .env*`, `cat .ssh/*`,
+`cat *.pem`, `cat id_*` and `cat *kubeconfig*` ask. Bare `*`/`?`,
+ordinary globs such as `*.log`, and git pathspecs such as
+`:!**/tests/**` do not. These stems come from the literal filename
+patterns above; a broad glob can still include a secret file, so this
+gate does not promise to catch every read through one.
 
 ### Heredoc bodies written as data
 
@@ -248,8 +252,8 @@ command** has this shape:
 Commands are separated only by line breaks, `;` and `&&`. Anything else —
 a shell, `eval`, `source`/`.`, `./f`, an interpreter, an assignment
 prefix, `exec 3<<`, `read … <<`, `git -c`, `gh api`, any unknown command —
-keeps the whole command on the strict path, where every body is read as a
-command line as before. That is what keeps each route in
+keeps the whole command on the strict path, subject to the interpreter
+rule below. That is what keeps each shell route in
 [Failing closed](#failing-closed) shut: a body written to `f` and then run
 by `bash f`, `. f` or `./f` in the same command, held in a variable for
 `eval`, or put on a descriptor, all still ask. The comment, delimiter-line
@@ -261,6 +265,17 @@ file something else executes on its own (`~/.bashrc`, a git hook, a FIFO
 a background shell reads). That is the same reach the Write tool already
 has, and the recommended "write it to a file, pass it by file" workaround
 has the same property.
+
+A heredoc consumed by `python`/`python3` (including versioned Python),
+`node`, `perl` or `ruby` is checked for literal secret names, with
+wildcard tokens ignored. The same applies when `cat` or `tee` writes a
+file and a later interpreter command names that destination or its
+basename, including after a `cd`. A following shell, `source` or `eval`
+keeps the file body on the strict path. An unquoted body containing a
+shell substitution, an unterminated body, an unknown consumer or an
+unrelated interpreter also stays strict. The surrounding shell command
+retains its usual checks, and literal secret-name checks inside an
+interpreter body remain active.
 
 ### What a reader-gate prompt says
 
@@ -283,13 +298,22 @@ reader has stopped reading it.
 So the prompt names the files where it honestly can. An **absolute**
 pattern has no working-directory dependence, so it is expanded when the
 prompt is written and up to six matching filenames go into the message:
-`cat /etc/ssl/private/*` asks with *it matches 3 file(s): server.key
-ca.key dhparam.pem*. A **relative** one is still not expanded, and says
+`cat /etc/ssl/private/*.key` asks with *it matches 2 file(s): server.key
+ca.key*. A **relative** one is still not expanded, and says
 so rather than implying the guard knows more than it does.
 
 Expansion happens only on the ask path, so an ordinary command pays
 nothing for it, and it carries **filenames only** — putting contents in
 the prompt would hand over exactly what the prompt exists to withhold.
+
+Each Bash reader ask appends a diagnostic record with `ts`, `hook`,
+`session`, `decision` and the complete command flattened to one line.
+The default log is `${HOME}/.claude/local/hook-ask-decisions.log`;
+`HOOK_DIAG_ASK_LOG` overrides it for tests or other collectors. Decision
+classes are `ask:literal`, `ask:wildcard` and `ask:inspection` (reserved
+tokenizer bytes). Logging failure leaves the
+permission decision intact. The log contains command text, so keep it
+private as you would a transcript.
 
 ### Why a negated find predicate is exempt
 
