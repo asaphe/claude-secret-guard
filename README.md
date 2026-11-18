@@ -394,6 +394,31 @@ on `grep secrets.pem README.md`, where the key-shaped word is what is being
 searched *for* rather than read — rare, and it fails safe. The alternative
 failed the other way, silently, on four spellings.
 
+### Why a kubectl output template is exempt
+
+`kubectl get pods -o jsonpath='{.items[*].spec.containers[*].env[*].name}' |
+grep RELAY` holds a wildcard and the text `.env`, so the wildcard check read
+the template as a glob that could match a `.env` file and asked. kubectl
+applies an inline template to API objects; it never opens it as a local file.
+The ask therefore protected nothing, and an agent working in the background
+waits on it until someone answers.
+
+The exemption models only the one part of kubectl's grammar that matters. The
+token must be the value of `-o`/`--output` (spelled `-o X`, `-oX`, `-o=X`,
+`--output X` or `--output=X`), start with an inline format (`jsonpath=`,
+`jsonpath-as-json=`, `custom-columns=`, `go-template=`, `template=`), and sit in
+a command whose program is literally `kubectl`. Everything else keeps being
+scanned:
+- the `-file` formats and `--template`, which can name a path;
+- `-f`, `--kubeconfig` and `kubectl cp` operands;
+- words after a separator or a substitution;
+- a program named by a variable;
+- the no-perl bare split.
+
+A spelling the rule does not recognise is scanned as before, so a miss asks
+instead of failing open — the failure direction § Why the pattern operand is
+scanned asks for.
+
 ## Why one Bash authority script, not several parallel hooks
 
 `hooks/hooks.json` registers a single script (`bash-secret-authority.sh`)

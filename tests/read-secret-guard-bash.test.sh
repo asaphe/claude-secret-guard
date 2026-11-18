@@ -304,6 +304,28 @@ for pattern in '*.key' '*.p12' '*.pfx' '.env.*' 'id_*' '*kubeconfig*' '.kube/con
   run ASK "derived secret stem: $pattern" "cat $pattern"
 done
 
+# --- a kubectl output template is evaluated against API objects, not opened as a local file ---
+# Each case pipes into grep, since a reader anywhere in the command is what arms the scan.
+run SILENT "kubectl jsonpath over container env names" "kubectl --context c -n ns get deploy a b -o jsonpath='{range .items[*]}{.metadata.name}{\": \"}{range .spec.template.spec.containers[*].env[*]}{.name}{\" \"}{end}{\"\\n\"}{end}' 2>&1 | tr ' ' '\\n' | grep -i relay"
+run SILENT "kubectl -o=jsonpath form"                  "kubectl get pods -o=jsonpath='{.items[*].spec.containers[*].env[*].name}' | grep -i relay"
+run SILENT "kubectl glued -ojsonpath form"             "kubectl get pods -ojsonpath='{.items[*].spec.containers[*].env[*].name}' | grep -i relay"
+run SILENT "kubectl --output=custom-columns form"      "kubectl get pods --output=custom-columns='N:.metadata.name,E:.spec.containers[*].env[*].name' | grep -i relay"
+run SILENT "kubectl after a path and an assignment"    "KUBECONFIG=k /usr/local/bin/kubectl get pods -o jsonpath='{.items[*].env[*].name}' | grep -i relay"
+run ASK    "control: the same template read by cat"    "cat jsonpath='{.items[*].env[*].name}' | grep -i relay"
+run ASK    "kubectl jsonpath-file still opens a file"  "kubectl get pods -o jsonpath-file=.env* | grep -i relay"
+run ASK    "kubectl cp of a dotenv wildcard"           "kubectl cp ns/pod:/app/.env* ./x && grep -r x ./x"
+run ASK    "the next command is read on its own"       "kubectl get pods -o jsonpath='{.items[*].env[*].name}' && cat .env*"
+run ASK    "a program named by a variable is unknown"  "\$K get pods -o jsonpath='{.items[*].env[*].name}' | grep -i relay"
+run ASK    "a template value outside kubectl"          "grep -o jsonpath='{.items[*].env}' notes.txt"
+run ASK    "a substitution closes the kubectl context" "grep -r x \$(kubectl config current-context) -o 'jsonpath=.env*'"
+run ASK    "a pipe hands the next words to grep"       "kubectl get pods | grep -o jsonpath='{.items[*].env}' -r ."
+# The no-perl bare split cannot tell a command from text, so it grants no exemption.
+NOPERL=$(mktemp -d)
+printf '#!/bin/sh\nexit 127\n' >"$NOPERL/perl"; chmod +x "$NOPERL/perl"
+actual=$(decide_noperl "kubectl get pods -o jsonpath='{.items[*].env[*].name}' | grep -i relay")
+if [ "$actual" = ASK ]; then printf 'ok   no perl: a kubectl template still asks\n'; pass=$((pass + 1)); else printf 'FAIL no perl: a kubectl template still asks — got %s\n' "$actual"; fail=$((fail + 1)); fi
+rm -rf "$NOPERL"
+
 # --- the reader need not be the first word --------------------------------------
 run ASK "reader after a semicolon"            "true; cat $PEM"
 run ASK "reader after &&"                     "ls -la && cat $PEM"
