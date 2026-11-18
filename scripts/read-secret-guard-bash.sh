@@ -363,6 +363,12 @@ RE_GLOB_SECRET="${ENV_STEM}|${KEY_STEM}|${SSH_STEM}|${KUBE_STEM}"
 RE_FIND_TOK='^([A-Za-z_][A-Za-z0-9_]*=)?\$?(.*/)?find$'
 RE_READER_TOK='^(.*/)?(cat|head|tail|less|more|grep)$'
 RE_CMD_START='^([;|&]+|sudo|doas|env|exec|time|nohup|nice|command|xargs)$'
+RE_SEP_TOK='^[;|&]+$'
+RE_ASSIGN_TOK='^[A-Za-z_][A-Za-z0-9_]*='
+# kubectl applies these templates to API objects and never opens a local file; jsonpath-file and the other -file variants do, so they stay scanned.
+RE_KUBE_TEMPLATE='^(jsonpath|jsonpath-as-json|custom-columns|go-template|template)='
+RE_KUBE_TEMPLATE_FLAG='^(-o=?|--output=)(jsonpath|jsonpath-as-json|custom-columns|go-template|template)='
+PROG=""
 FIND_ACTIVE=""
 NO_EXEMPT=""
 PREV=""
@@ -380,9 +386,9 @@ ask_read() {  # ask_read <word> <what it looks like>
 while IFS= read -r -d '' token; do
   # \001 starts a command; \002 opens the whole-command bare split, read with no exemption so that text 0.6.5 masked cannot widen it there; \003 closes a substitution, whose next word is an argument, not a command; \004 names where the words after it sit.
   case "$token" in
-    $'\001') FIND_ACTIVE=""; PREV=""; PREV2=""; PREV3=""; NO_EXEMPT=""; continue ;;
+    $'\001') FIND_ACTIVE=""; PREV=""; PREV2=""; PREV3=""; NO_EXEMPT=""; PROG=""; continue ;;
     $'\002') NO_EXEMPT=1; WHERE="the command read word by word (it did not parse cleanly, so text is checked too)"; continue ;;
-    $'\003') FIND_ACTIVE=""; PREV=$'\003'; PREV2=""; PREV3=""; continue ;;
+    $'\003') FIND_ACTIVE=""; PREV=$'\003'; PREV2=""; PREV3=""; PROG="?"; continue ;;
     $'\004'*) WHERE=${token#?}; LITERAL_ONLY=""; case "$WHERE" in $'\005'*) LITERAL_ONLY=1; WHERE=${WHERE#?} ;; esac; continue ;;
   esac
   # A SINGLY negated find predicate whose operand is a WILDCARD can only SHRINK the set of files touched, so it is never a read target; a second negation makes it positive again and a literal operand is indistinguishable from a filename — see README § Why a negated find predicate is exempt.
@@ -401,6 +407,17 @@ while IFS= read -r -d '' token; do
     FIND_ACTIVE=""
   fi
   PREV3=$PREV2; PREV2=$PREV; PREV=$token
+  # The first word after a separator that is neither a wrapper nor an assignment names the program; after a substitution it stays unknown.
+  if [[ $token =~ $RE_SEP_TOK ]]; then
+    PROG=""
+  elif [ -z "$PROG" ] && [[ ! $token =~ $RE_CMD_START ]] && [[ ! $token =~ $RE_ASSIGN_TOK ]]; then
+    PROG=${token##*/}
+  fi
+  # see README § Why a kubectl output template is exempt
+  if [ -z "$NO_EXEMPT" ] && [ "$PROG" = kubectl ] \
+     && { { [[ $PREV2 =~ ^(-o|--output)$ ]] && [[ $token =~ $RE_KUBE_TEMPLATE ]]; } || [[ $token =~ $RE_KUBE_TEMPLATE_FLAG ]]; }; then
+    continue
+  fi
   # Every token is scanned, grep's pattern operand included: modelling grep's flag grammar to spare that one token cost four fail-opens — see README § Why the pattern operand is scanned.
   case "$token" in
     --*=*) token=${token#*=} ;;
