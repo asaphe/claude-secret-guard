@@ -31,6 +31,8 @@ WORK=$(mktemp -d "${TMPDIR:-/tmp}/secret-guard-fixtures.XXXXXX") || {
   exit 1
 }
 trap 'rm -rf "$WORK"' EXIT
+# The read guard logs every ask; without this the suite appends to the live decision log.
+export HOOK_DIAG_ASK_LOG="$WORK/asks.log"
 
 expect_exit() {  # expect_exit <label> <want> <got>
   if [ "$3" = "$2" ]; then ok "$1"; else bad "$1" "expected exit $2, got $3"; fi

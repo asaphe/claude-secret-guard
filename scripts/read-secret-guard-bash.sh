@@ -357,7 +357,12 @@ RE_ENV="^-*${ENV_STEM}(\..+)?$"
 RE_ENV_SAMPLE='^-*\.env\.(example|sample|template)$'
 RE_KEY_NAME="${KEY_STEM}$|^-*${SSH_STEM}(rsa|ed25519|ecdsa|dsa)$|^-*${KUBE_STEM}$"
 RE_KEY_PATH='\.kube/config$|(^|/)\.ssh(/|$)'
-RE_GLOB_SECRET="${ENV_STEM}|${KEY_STEM}|${SSH_STEM}|${KUBE_STEM}"
+# A stem counts only as a whole name segment of the last path component, never inside another word — see README § Which wildcards are asked about.
+RE_GLOB_SECRET="${ENV_STEM}([*?._-]|\$)|${KEY_STEM}([*?._-]|\$)|(^|[*?])${SSH_STEM}|[._-]${SSH_STEM}(rsa|ed25519|ecdsa|dsa)|(^|[*?._-])${KUBE_STEM}"
+# A regex alternation or escape is a pattern for a matcher, not a path a shell expands.
+RE_NOT_PATH='[|\\]'
+# Shapes a JMESPath or jq expression takes and a filename practically never does: an empty or filter bracket, a pipe, an unopened ].
+RE_QUERY_EXPR='\[\]|\[\?|\||^[^[]*\]'
 
 # The exemption below is armed by a `find` TOKEN and disarmed by the next reader token, so it covers only the window in which find's own grammar governs — see README § Why a negated find predicate is exempt.
 RE_FIND_TOK='^([A-Za-z_][A-Za-z0-9_]*=)?\$?(.*/)?find$'
@@ -429,11 +434,16 @@ while IFS= read -r -d '' token; do
   if [[ $token =~ $RE_GLOB ]]; then
     [ -n "$LITERAL_ONLY" ] && continue
     STEM=${token//\*/}; STEM=${STEM//\?/}
-    if [[ $STEM =~ $RE_GLOB_SECRET ]] || [[ $STEM =~ $RE_KEY_PATH ]]; then
+    # Only the text after the last = names a file: an assignment, a URL query or a flag value.
+    GLOB_BASE=${token##*=}; GLOB_BASE=${GLOB_BASE%"${GLOB_BASE##*[!/]}"}; GLOB_BASE=${GLOB_BASE##*/}
+    if [[ $STEM =~ $RE_KEY_PATH ]] || { [[ ! $token =~ $RE_NOT_PATH ]] && [[ ! $GLOB_BASE =~ $RE_QUERY_EXPR ]] \
+         && [[ $GLOB_BASE =~ $RE_GLOB_SECRET ]]; }; then
       ask_read "$token" "an unresolved wildcard that could match a secret file; $(describe_glob "$token")" "ask:wildcard"
     fi
     continue
   fi
+  # see README § Which literal names are asked about
+  [[ $BASENAME =~ $RE_QUERY_EXPR ]] && continue
   if [[ $BASENAME =~ $RE_ENV ]] && [[ ! $BASENAME =~ $RE_ENV_SAMPLE ]]; then
     ask_read "$token" "it looks like a live env file, which usually holds secrets"
   fi

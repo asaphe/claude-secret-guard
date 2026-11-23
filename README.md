@@ -227,6 +227,43 @@ ordinary globs such as `*.log`, and git pathspecs such as
 patterns above; a broad glob can still include a secret file, so this
 gate does not promise to catch every read through one.
 
+### Which wildcards are asked about
+
+A stem counts only as a whole name segment of the last path component,
+because a substring match asked on words that are not paths at all: a
+kubectl or jq expression (`env[*]`), a grep regex (`env\.ENVIRONMENT`,
+`oidc_id_token|id_token.*refresh`), Python text (`{**os.environ}`). The
+segment rules:
+
+- `.env` and the key extensions (`.pem`, `.key`, `.p12`, `.pfx`) are
+  followed by the end of the name, a wildcard, `.`, `-` or `_`: `*.env`,
+  `.env*`, `app.env.*`, `*.key.bak` ask; `*.environment`, `*.keys` do not.
+- `id_` starts the name or follows a wildcard: `id_*`, `*id_rsa*` ask;
+  `DEPLOYMENT_ID_*` does not. After `.`, `-` or `_` it counts only when a
+  key type follows: `backup-id_rsa*` asks, `okta_id_token*` does not.
+- `kubeconfig` starts the name or follows a wildcard, `.`, `-` or `_`.
+- Only the text after the last `=` is judged, since that is what an
+  assignment, a flag value or a URL query names: `F=~/.ssh/id_*` asks,
+  `contents/x.env?ref=<sha>` does not.
+- A word holding a regex alternation or escape (`|`, `\`), or a JMESPath
+  or jq shape (`[]`, `[?`, a `]` with no `[` before it), is a pattern for
+  a matcher, not a path the shell expands.
+- A `.ssh` or `.kube/config` component anywhere in the word still asks,
+  whatever the last component is.
+
+A quoted path with spaces is still a path: `cat "/My Drive/keys/*.pem"`
+asks.
+
+### Which literal names are asked about
+
+The literal checks (live env file, private key, kubeconfig) skip a last
+component shaped like a JMESPath or jq expression, the same `[]`, `[?`,
+`|` and unopened-`]` shapes as above: `Contents[].Key` and
+`to_entries[]|select(.key)` name fields, not files. A dotted name ending in
+a key extension (`s.key`, `self.key`) still asks: nothing in its shape
+separates an object field from a key file, and `server.key` is the common
+case.
+
 ### Heredoc bodies written as data
 
 `cat >> notes.md <<'EOF'` followed by prose that names `python/**` or
@@ -418,6 +455,10 @@ scanned:
 A spelling the rule does not recognise is scanned as before, so a miss asks
 instead of failing open — the failure direction § Why the pattern operand is
 scanned asks for.
+
+The segment rule (§ Which wildcards are asked about) now clears the
+`env[*]` shape on its own. The exemption still matters for a template whose
+literal text holds a secret segment, such as `{.metadata.name}.env*`.
 
 ## Why one Bash authority script, not several parallel hooks
 

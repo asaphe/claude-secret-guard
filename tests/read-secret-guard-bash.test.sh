@@ -277,6 +277,11 @@ run SILENT "markdown code spans in a python body" "grep -c x f.md; python3 - <<'
 
 # --- ordinary reads must stay silent -------------------------------------------
 run SILENT "plain markdown read"              "cat README.md"
+run SILENT "JMESPath projection ending in Key"   "grep -c 'Contents[].Key' out.json"
+run SILENT "jq filter selecting .key"            "grep -c 'to_entries[]|select(.key)' out.json"
+run SILENT "regex alternation of env files"      "grep -n '.env.web|env.production' Makefile"
+run ASK "bracket glob before a key suffix"       "cat key[12].pem"
+run ASK "dotted name ending in .key"             "cat s.key"
 run SILENT "dotenv example is allowlisted"    "cat .env.example"
 run SILENT "quoted dotenv example"            'cat ".env.example"'
 run SILENT "quoted dotenv template"           'cat ".env.template"'
@@ -304,25 +309,51 @@ for pattern in '*.key' '*.p12' '*.pfx' '.env.*' 'id_*' '*kubeconfig*' '.kube/con
   run ASK "derived secret stem: $pattern" "cat $pattern"
 done
 
+# --- a stem asks only as a whole name segment of a path, never inside a pattern or expression ---
+run SILENT "jsonpath env list read by grep"        "grep -o '{range .spec.containers[0].env[*]}{.name}{end}' notes.txt"
+run SILENT "regex escaping a dotted env name"      "grep -n 'role/\\\$\\{\\{ *env\\.ENVIRONMENT *\\}\\}' ci.yaml"
+run SILENT "regex alternation naming id_token"     "grep -nE 'oidc_id_token|id_token.*refresh' auth.py"
+run SILENT "id_ inside an identifier"              "grep -n 'DEPLOYMENT_ID_LENGTH *=' ids.py"
+run SILENT "dict unpacking of os.environ"          "grep -n '{**os.environ, x}' run.py"
+run SILENT "env in a longer word"                  "cat *.environment"
+run SILENT "key in a longer extension"             "cat *.keys"
+run SILENT "template field ending in key"          "grep -n '[\${each.key}-*]' main.tf"
+run SILENT "JMESPath filter naming a Key"          "grep -n 'Contents[?ends_with(Key, x)].Key' q.txt"
+run SILENT "URL query after an env name"           "grep -n 'contents/<svc>.env?ref=<sha>' notes.txt"
+run SILENT "assignment of a status code"           "id_rc=\$?; cat app.log"
+run ASK "key glob under a quoted spaced path"     'cat "/My Drive/keys/*.pem"'
+run ASK "env glob as an --include value"          "grep -r TOKEN --include=*.env ."
+run ASK "env glob in a directory"                 "grep -r TOKEN env/*.env"
+run ASK "wildcard directory before a key name"    "cat backups/*/id_rsa"
+run ASK "key glob with a backup suffix"           "cat *.key.bak"
+run ASK "key-type name after a separator"        "cat backup-id_rsa*"
+run ASK "key-type name after an underscore"      "cat old_id_ed25519*"
+run SILENT "id_ token name after a separator"      "cat okta_id_token*"
+run ASK "assignment of a secret glob"             "F=~/.ssh/id_*; cat \$F"
+run ASK "braced home before .ssh"                 "cat \${HOME}/.ssh/*"
+run ASK "kubeconfig with a prefix"                "cat prod-kubeconfig*"
+run ASK "env glob after a separator prefix"       "cat app.env.*"
+
 # --- a kubectl output template is evaluated against API objects, not opened as a local file ---
 # Each case pipes into grep, since a reader anywhere in the command is what arms the scan.
+# The templates end in .env*, which still asks outside kubectl, so each SILENT case exercises the exemption itself.
 run SILENT "kubectl jsonpath over container env names" "kubectl --context c -n ns get deploy a b -o jsonpath='{range .items[*]}{.metadata.name}{\": \"}{range .spec.template.spec.containers[*].env[*]}{.name}{\" \"}{end}{\"\\n\"}{end}' 2>&1 | tr ' ' '\\n' | grep -i relay"
-run SILENT "kubectl -o=jsonpath form"                  "kubectl get pods -o=jsonpath='{.items[*].spec.containers[*].env[*].name}' | grep -i relay"
-run SILENT "kubectl glued -ojsonpath form"             "kubectl get pods -ojsonpath='{.items[*].spec.containers[*].env[*].name}' | grep -i relay"
-run SILENT "kubectl --output=custom-columns form"      "kubectl get pods --output=custom-columns='N:.metadata.name,E:.spec.containers[*].env[*].name' | grep -i relay"
-run SILENT "kubectl after a path and an assignment"    "KUBECONFIG=k /usr/local/bin/kubectl get pods -o jsonpath='{.items[*].env[*].name}' | grep -i relay"
-run ASK    "control: the same template read by cat"    "cat jsonpath='{.items[*].env[*].name}' | grep -i relay"
+run SILENT "kubectl -o=jsonpath form"                  "kubectl get pods -o=jsonpath='{.items[*].metadata.name}.env*' | grep -i relay"
+run SILENT "kubectl glued -ojsonpath form"             "kubectl get pods -ojsonpath='{.items[*].metadata.name}.env*' | grep -i relay"
+run SILENT "kubectl --output=custom-columns form"      "kubectl get pods --output=custom-columns='N:.metadata.name,F:*.env*' | grep -i relay"
+run SILENT "kubectl after a path and an assignment"    "KUBECONFIG=k /usr/local/bin/kubectl get pods -o jsonpath='{.items[*].metadata.name}.env*' | grep -i relay"
+run ASK    "control: the same template read by cat"    "cat jsonpath='{.items[*].metadata.name}.env*' | grep -i relay"
 run ASK    "kubectl jsonpath-file still opens a file"  "kubectl get pods -o jsonpath-file=.env* | grep -i relay"
 run ASK    "kubectl cp of a dotenv wildcard"           "kubectl cp ns/pod:/app/.env* ./x && grep -r x ./x"
-run ASK    "the next command is read on its own"       "kubectl get pods -o jsonpath='{.items[*].env[*].name}' && cat .env*"
-run ASK    "a program named by a variable is unknown"  "\$K get pods -o jsonpath='{.items[*].env[*].name}' | grep -i relay"
-run ASK    "a template value outside kubectl"          "grep -o jsonpath='{.items[*].env}' notes.txt"
+run ASK    "the next command is read on its own"       "kubectl get pods -o jsonpath='{.items[*].metadata.name}.env*' && cat .env*"
+run ASK    "a program named by a variable is unknown"  "\$K get pods -o jsonpath='{.items[*].metadata.name}.env*' | grep -i relay"
+run ASK    "a template value outside kubectl"          "grep -o jsonpath='{.items[*].metadata.name}.env*' notes.txt"
 run ASK    "a substitution closes the kubectl context" "grep -r x \$(kubectl config current-context) -o 'jsonpath=.env*'"
-run ASK    "a pipe hands the next words to grep"       "kubectl get pods | grep -o jsonpath='{.items[*].env}' -r ."
+run ASK    "a pipe hands the next words to grep"       "kubectl get pods | grep -o jsonpath='{.items[*].metadata.name}.env*' -r ."
 # The no-perl bare split cannot tell a command from text, so it grants no exemption.
 NOPERL=$(mktemp -d)
 printf '#!/bin/sh\nexit 127\n' >"$NOPERL/perl"; chmod +x "$NOPERL/perl"
-actual=$(decide_noperl "kubectl get pods -o jsonpath='{.items[*].env[*].name}' | grep -i relay")
+actual=$(decide_noperl "kubectl get pods -o jsonpath='{.items[*].metadata.name}.env*' | grep -i relay")
 if [ "$actual" = ASK ]; then printf 'ok   no perl: a kubectl template still asks\n'; pass=$((pass + 1)); else printf 'FAIL no perl: a kubectl template still asks — got %s\n' "$actual"; fail=$((fail + 1)); fi
 rm -rf "$NOPERL"
 
