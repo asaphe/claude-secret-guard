@@ -13,6 +13,8 @@ WORK=$(mktemp -d)
 # A unique session_id is mandatory: without one the tracker is keyed on $CLAUDE_CODE_SESSION_ID (the live session's, under Claude Code) or the calling process, which the trap never removes.
 SESSION_ID="secret-guard-suite-$$"
 ERR="$WORK/stderr"
+# The read guard logs every ask; without this the suite appends to the live decision log.
+export HOOK_DIAG_ASK_LOG="$WORK/asks.log"
 OUT="$WORK/stdout"
 trap 'rm -rf "$WORK" "/tmp/claude-op-reads-$SESSION_ID"*' EXIT
 
