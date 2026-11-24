@@ -236,8 +236,36 @@ kubectl or jq expression (`env[*]`), a grep regex (`env\.ENVIRONMENT`,
 segment rules:
 
 - `.env` and the key extensions (`.pem`, `.key`, `.p12`, `.pfx`) are
-  followed by the end of the name, a wildcard, `.`, `-` or `_`: `*.env`,
-  `.env*`, `app.env.*`, `*.key.bak` ask; `*.environment`, `*.keys` do not.
+  followed by the end of the name, a wildcard, `.`, `-`, `_`, `~` or a
+  bracket class: `*.env`, `.env*`, `app.env.*`, `*.key.bak`, `*.key~`,
+  `.env[.]*` ask; `*.environment`, `*.keys` and a jsonpath index such as
+  `env[*]` do not.
+- A `{a,b}` list or a `{x..y}` letter or number range is expanded as the
+  shell would, in any word, and each alternative is judged on its own:
+  `cat {*.pem,*.key}`, `cat *.pem{,.bak}`, `cat .env{,.local}`,
+  `cat id_{rsa,ed25519}` and `cat *.pe{l..n}` ask. A number range is walked
+  in base 10 without zero padding (`{08..12}` gives `8` to `12`), and only
+  when both ends have at most six digits.
+- A word the gate does not expand (over 4 KB, more than 64 alternatives,
+  more than 512 across the command, or a range it cannot walk) asks when,
+  with its braces and commas removed, it still holds a secret name anywhere
+  in it, not only as a whole name segment, or a secret name's letters in
+  order with only punctuation or spaces between them. So
+  `cat .{e,a1..a70}nv`, `cat .{e,:}nv{…65 more}` and also
+  `cat {1..70}.environment.yaml` ask, while `cat part{1..100}.log` and
+  `printf 'x%.0s' {1..300}` stay silent. A name
+  split by letters past that budget (`.{e,abc}nv` after 512 alternatives
+  elsewhere in the command) is not caught; 0.6.14 caught no split name.
+- A word longer than 4 KB, glob or not, is judged by a single match for a
+  secret name anywhere in it, since trimming it to its last path component
+  is too slow on bash 3.2 to finish within the hook's timeout. So a 6 KB
+  commit message that mentions `.environment` asks when the command also
+  runs a reader.
+- An absolute glob with more than two wildcard path components is not
+  listed in the prompt, since walking the filesystem for it has no time
+  bound.
+- A command too long to scan within 20 seconds asks, since a hook killed at
+  its timeout lets the command run unchecked.
 - `id_` starts the name or follows a wildcard: `id_*`, `*id_rsa*` ask;
   `DEPLOYMENT_ID_*` does not. After `.`, `-` or `_` it counts only when a
   key type follows: `backup-id_rsa*` asks, `okta_id_token*` does not.
@@ -245,9 +273,10 @@ segment rules:
 - Only the text after the last `=` is judged, since that is what an
   assignment, a flag value or a URL query names: `F=~/.ssh/id_*` asks,
   `contents/x.env?ref=<sha>` does not.
-- A word holding a regex alternation or escape (`|`, `\`), or a JMESPath
-  or jq shape (`[]`, `[?`, a `]` with no `[` before it), is a pattern for
-  a matcher, not a path the shell expands.
+- A last path component holding a regex alternation or escape (`|`, `\`),
+  or a JMESPath or jq shape (`[]`, `[?`, a `]` with no `[` before it), is a
+  pattern for a matcher, not a path the shell expands. A `|` or `\` in a
+  directory before it does not count: `cat "a|b"/*.pem` asks.
 - A `.ssh` or `.kube/config` component anywhere in the word still asks,
   whatever the last component is.
 

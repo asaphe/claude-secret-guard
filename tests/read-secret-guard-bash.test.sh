@@ -15,7 +15,8 @@ export HOOK_DIAG_ASK_LOG="$WORK/asks.log"
 decide() {  # decide <command-text> -> ASK | SILENT
   local out
   out=$(printf '%s' "$(jq -nc --arg c "$1" '{tool_input:{command:$c}}')" | bash "$GUARD" 2>/dev/null)
-  if printf '%s' "$out" | grep -q '"permissionDecision":[[:space:]]*"ask"'; then
+  # A here-string, not a pipe: under pipefail, grep -q exiting early on a large output fails the pipeline.
+  if grep -q '"permissionDecision":[[:space:]]*"ask"' <<<"$out"; then
     printf 'ASK'
   else
     printf 'SILENT'
@@ -240,9 +241,9 @@ printf '#!/bin/sh\nexit 127\n' >"$NOPERL/perl"; chmod +x "$NOPERL/perl"
 decide_noperl() {
   local out
   out=$(printf '%s' "$(jq -nc --arg c "$1" '{tool_input:{command:$c}}')" | PATH="$NOPERL:$PATH" bash "$GUARD" 2>/dev/null)
-  if printf '%s' "$out" | grep -q '"permissionDecision":[[:space:]]*"ask"'; then printf 'ASK'; else printf 'SILENT'; fi
+  if grep -q '"permissionDecision":[[:space:]]*"ask"' <<<"$out"; then printf 'ASK'; else printf 'SILENT'; fi
 }
-for c in "cat notes.txt && git commit -m \"x | find\" && echo ! -name .env*" "cat notes.txt && echo ! -name .env*"; do
+for c in "cat notes.txt && git commit -m \"x | find\" && echo ! -name .env*" "cat notes.txt && echo ! -name .env*" "cat ~/.ssh/id_rsa|base64" "cat *.pem|head" "cat *.pem;echo" "cat *.pem&&echo" "X=\`cat .env\`" "cat \\.env" "cat \$'.env'"; do
   actual=$(decide_noperl "$c")
   if [ "$actual" = ASK ]; then printf 'ok   no perl: %s\n' "$c"; pass=$((pass + 1)); else printf 'FAIL no perl: %s — expected ASK, got %s\n' "$c" "$actual"; fail=$((fail + 1)); fi
 done
@@ -327,6 +328,39 @@ run ASK "env glob in a directory"                 "grep -r TOKEN env/*.env"
 run ASK "wildcard directory before a key name"    "cat backups/*/id_rsa"
 run ASK "key glob with a backup suffix"           "cat *.key.bak"
 run ASK "key-type name after a separator"        "cat backup-id_rsa*"
+run ASK "brace list of key globs"                "cat {*.pem,*.key}"
+run ASK "brace list naming an env glob"          "grep -l SECRET {*.env,*.yaml}"
+run ASK "brace list of ssh key names"            "cat ~/backup/{id_*,known_hosts}"
+run ASK "brace backup suffix on a key glob"      "cat *.pem{,.bak}"
+run ASK "brace list as an --include value"       "grep -r KEY --include={*.env,*.pem} ."
+run ASK "editor backup of a key glob"            "cat *.key~"
+run ASK "pipe in a directory before a key glob"  'cat "a|b"/*.pem'
+run SILENT "brace list with no secret name"        "cat {*.log,*.txt}"
+run ASK "literal brace list of env files"       "cat .env{,.local}"
+run ASK "literal brace list of key names"       "cat id_{rsa,ed25519}"
+run ASK "literal brace list of key extensions"  "cat server.{pem,crt}"
+run ASK "letter range reaching a key extension" "cat *.pe{l..n}"
+run ASK "quoted newline inside a brace list"     $'cat {"\n",*.pem}'
+run ASK "range this gate cannot expand"         "cat {a..zz}.pem"
+run ASK "brace word past the cap naming a key"  "cat {a,b}{a,b}{a,b}{a,b}{a,b}{a,b}{a,b}*.pem"
+run SILENT "brace word past the cap naming none"   "cat {a,b}{a,b}{a,b}{a,b}{a,b}{a,b}{a,b}*.txt"
+run SILENT "JSON body past the cap"                 "grep -c x f.txt; echo '{\"a\":[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59,60,61,62,63,64,65]}'"
+run SILENT "large numeric range"                    "cat notes.txt; printf 'x%.0s' {1..300}"
+run ASK "bracket class after an env stem"       "cat .env[.]*"
+run ASK "negated bracket class after an env stem" "cat .env[!x]*"
+run ASK "stem split across an over-cap list"    "cat .{e,a1..a70}nv"
+run ASK "ssh dir split across an over-cap list" "cat ~/.s{s,a1..a70}h/config"
+run SILENT "over-cap word naming no stem"          "cat x1{1..90}"
+run SILENT "numbered parts past the cap"           "cat part{1..100}.log"
+run SILENT "dated files past the cap"              "head -n1 data_{2019..2024}_{01..12}.csv"
+run SILENT "source tree past the cap"              "grep -l TODO src/{a,b,c,d,e,f,g,h}/{1,2,3,4,5,6,7,8,9}.py"
+run ASK "deep absolute glob still asks"         "cat /*/*/*/*/*/*/.env*"
+run SILENT "numeric range with no secret name"     "cat {1..5}.log"
+run ASK "zero-padded range before a secret file" "cat logs/2024-{08..12}.log .env"
+run ASK "zero-padded range reaching a key extension" "cat x.p{08..12}"
+run SILENT "zero-padded range with no secret name" "cat logs/2024-{08..12}.log"
+run ASK "range past int64 before a secret file"  "cat {0..18446744073709551615} .env"
+run SILENT "regex interval quantifier"             "grep -nE 'x{1,3}' f.txt"
 run ASK "key-type name after an underscore"      "cat old_id_ed25519*"
 run SILENT "id_ token name after a separator"      "cat okta_id_token*"
 run ASK "assignment of a secret glob"             "F=~/.ssh/id_*; cat \$F"
@@ -515,6 +549,22 @@ else
   printf 'FAIL a silent reader still allows — expected exit 0, got %s\n' "$AUTH_OK"; fail=$((fail + 1))
 fi
 rm -rf "$AUTH_DIR"
+
+# A scan that would overrun the hook timeout asks.
+actual=$(SECRET_GUARD_SCAN_DEADLINE=0 decide "cat notes.txt")
+if [ "$actual" = ASK ]; then printf 'ok   an exhausted deadline asks\n'; pass=$((pass + 1)); else printf 'FAIL an exhausted deadline asks — got %s\n' "$actual"; fail=$((fail + 1)); fi
+many=$(printf '{a,b}{a,b}*.txt %.0s' $(seq 1 300))
+burn=$(printf 'x%s{1..60} ' 1 2 3 4 5 6 7 8 9)
+run ASK "split stem after the budget is spent"   "cat $burn .e{n,:}v"
+wide=$(printf 'a,%.0s' $(seq 1 50000))
+run ASK "one list of 50000 alternatives"         "cat {${wide}a} .env"
+many65=$(printf ',a%s' $(seq 1 65))
+run ASK "colon split stem past the cap"         "cat .{e,:}nv{${many65}}"
+run ASK "space split key past the cap"          "cat x.p{e,\" \"}m{${many65}}"
+longglob=$(printf 'a%.0s' $(seq 1 100000))
+run ASK "secret read after a 100 KB glob"       "cat *${longglob} .env"
+run ASK "secret name inside a 5 KB brace word"  "cat {.env,x:${longglob:0:5000}}"
+run ASK "brace words past the per-command budget" "cat $many server.{pem,crt}"
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

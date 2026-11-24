@@ -20,8 +20,10 @@ fi
 BASENAME=$(basename "$FILE_PATH")
 
 ask() {
+  # A jq that cannot start would print nothing, which reads as allow, so a fixed ask stands in.
   jq -n --arg reason "$1" \
-    '{hookSpecificOutput: {hookEventName: "PreToolUse", permissionDecision: "ask", permissionDecisionReason: $reason}}'
+    '{hookSpecificOutput: {hookEventName: "PreToolUse", permissionDecision: "ask", permissionDecisionReason: $reason}}' 2>/dev/null \
+    || printf '%s\n' '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"ask","permissionDecisionReason":"READ-SECRET GUARD: this read may target a secret file, and the reason could not be described. Confirm before its contents enter context/transcript."}}'
   exit 0
 }
 

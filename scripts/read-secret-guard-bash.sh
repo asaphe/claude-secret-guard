@@ -29,15 +29,18 @@ ask() {
   local log session flat
   log=${HOOK_DIAG_ASK_LOG:-${HOME}/.claude/local/hook-ask-decisions.log}
   session=$(printf '%s' "$INPUT" | jq -r '.session_id // empty' | tr -dc 'A-Za-z0-9-')
-  flat=${CMD//$'\n'/ }; flat=${flat//$'\r'/ }
+  # tr, not ${CMD//$'\n'/ }: on bash 3.2 that substitution takes ~50 s on a 37 KB command, past the hook timeout, so the ask never lands.
+  flat=$(printf '%s' "$CMD" | LC_ALL=C tr '\r\n' '  ')
   # Diagnostics must never replace the permission decision when the log is unwritable.
   { mkdir -p "$(dirname "$log")" && (
     umask 077
     printf '%s\n' '---' "ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)" 'hook=read-secret-guard-bash' \
       "session=$session" "decision=${2:-ask:literal}" "cmd=$flat" >>"$log"
   ); } 2>/dev/null || :
+  # A jq that cannot start would print nothing, which reads as allow, so a fixed ask stands in.
   jq -n --arg reason "$1" \
-    '{hookSpecificOutput: {hookEventName: "PreToolUse", permissionDecision: "ask", permissionDecisionReason: $reason}}'
+    '{hookSpecificOutput: {hookEventName: "PreToolUse", permissionDecision: "ask", permissionDecisionReason: $reason}}' 2>/dev/null \
+    || printf '%s\n' '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"ask","permissionDecisionReason":"READ-SECRET GUARD: this command may read a secret file, and the reason was too large to describe. Confirm before its contents enter context/transcript."}}'
   exit 0
 }
 
@@ -48,13 +51,16 @@ esac
 
 # What the prompt can honestly say about a pattern that is never expanded for the verdict — an absolute glob has no cwd dependence, so naming its matches is reproducible where naming a relative one's would not be; see README § What an unresolved glob prompt says.
 describe_glob() {
-  local p="$1" hits n
+  local p="$1" hits n wild
   # shellcheck disable=SC2088  # the literal ~ is what tokenize hands over; expanding it is the point
   case "$p" in "~/"*) p="${HOME}/${p#\~/}" ;; esac
   case "$p" in
     /*) ;;
     *) printf "not expanded here, since this hook's working directory is not the command's"; return ;;
   esac
+  wild=$(printf '%s\n' "${p//\//$'\n'}" | grep -c '[*?[]')
+  # A deep absolute glob walks the filesystem with no bound, and the ask is only written after the listing returns.
+  [ "$wild" -le 2 ] || { printf "not listed here, since a glob this broad is too slow to expand within the hook's time budget"; return; }
   # Names only, never contents: the contents are the thing this prompt exists to withhold.
   hits=$(compgen -G "$p" 2>/dev/null)
   [ -n "$hits" ] || { printf 'it matches nothing under that path right now, but expands when the command runs'; return; }
@@ -338,13 +344,17 @@ tokenize() {
 
 # Fails closed like the jq check above: with nowhere to tokenize into, no argument was ever inspected.
 TOKENS_FILE=$(mktemp) || ask "READ-SECRET GUARD: could not create the temporary file this gate tokenizes into, so the arguments of this read were never inspected — confirm before its contents enter context/transcript."
-trap 'rm -f "$TOKENS_FILE"' EXIT
+FLAT_FILE=""
+trap 'rm -f "$TOKENS_FILE" ${FLAT_FILE:+"$FLAT_FILE"}' EXIT
 tokenize "$CMD" >"$TOKENS_FILE" 2>/dev/null
 # A missing perl empties this, which would make every read silent — fall back to a bare split so the gate still asks.
 if [ ! -s "$TOKENS_FILE" ]; then
   # Led by the no-exemption marker, as the perl path's bare split is, since a bare split cannot tell a command from text; the trailing newline keeps `read -d ''` from discarding the last token at EOF.
-  { printf '\002\n'; printf '%s' "$CMD" | tr -d '"'"'"'' | tr -s ' \t\n<>' '\n'; printf '\n'; } | tr '\n' '\0' >"$TOKENS_FILE"
+  { printf '\002\n'; printf '%s' "$CMD" | tr -d '"'"'"'\\$' | tr -s ' \t\n<>|;&()`' '\n'; printf '\n'; } | tr '\n' '\0' >"$TOKENS_FILE"
 fi
+# Every word with its braces and commas removed, read in step with the words: one tr here, where a tr per over-budget word cost ~15 ms and a large JSON heredoc has thousands.
+FLAT_FILE=$(mktemp) || FLAT_FILE=""
+[ -z "$FLAT_FILE" ] || LC_ALL=C tr -d '{},' <"$TOKENS_FILE" >"$FLAT_FILE" || : >"$FLAT_FILE"
 
 # Matched with bash's own regex engine rather than a grep per test: this loop runs before every Bash call, and the forks it used to spend cost more than the scan it performs.
 shopt -s nocasematch
@@ -358,7 +368,13 @@ RE_ENV_SAMPLE='^-*\.env\.(example|sample|template)$'
 RE_KEY_NAME="${KEY_STEM}$|^-*${SSH_STEM}(rsa|ed25519|ecdsa|dsa)$|^-*${KUBE_STEM}$"
 RE_KEY_PATH='\.kube/config$|(^|/)\.ssh(/|$)'
 # A stem counts only as a whole name segment of the last path component, never inside another word — see README § Which wildcards are asked about.
-RE_GLOB_SECRET="${ENV_STEM}([*?._-]|\$)|${KEY_STEM}([*?._-]|\$)|(^|[*?])${SSH_STEM}|[._-]${SSH_STEM}(rsa|ed25519|ecdsa|dsa)|(^|[*?._-])${KUBE_STEM}"
+RE_GLOB_SECRET="${ENV_STEM}([*?._~-]|\[[^]0-9*]|\$)|${KEY_STEM}([*?._~-]|\[[^]0-9*]|\$)|(^|[*?])${SSH_STEM}|[._-]${SSH_STEM}(rsa|ed25519|ecdsa|dsa)|(^|[*?._-])${KUBE_STEM}"
+# Up to 16 punctuation or space characters, the gap a brace split leaves between a stem's letters; letters are excluded, or dotted jq paths match.
+RE_GAP=$'[^[:alnum:]/\n]{0,16}'
+# A stem's letters in order, so a name split across brace alternatives (`.{e,x}nv`) still counts once the braces are removed.
+RE_STEM_FRAG="\\.e${RE_GAP}n${RE_GAP}v|\\.p${RE_GAP}e${RE_GAP}m|\\.k${RE_GAP}e${RE_GAP}y|\\.p${RE_GAP}1${RE_GAP}2|\\.p${RE_GAP}f${RE_GAP}x|i${RE_GAP}d${RE_GAP}_${RE_GAP}(r${RE_GAP}s${RE_GAP}a|e${RE_GAP}d|e${RE_GAP}c|d${RE_GAP}s${RE_GAP}a)|k${RE_GAP}u${RE_GAP}b${RE_GAP}e${RE_GAP}c${RE_GAP}o${RE_GAP}n${RE_GAP}f|\\.s${RE_GAP}s${RE_GAP}h"
+# Any stem anywhere in the word: the pre-segment rule, kept for a brace word too large to expand.
+RE_STEM_ANY="${ENV_STEM}|${KEY_STEM}|${SSH_STEM}|${KUBE_STEM}"
 # A regex alternation or escape is a pattern for a matcher, not a path a shell expands.
 RE_NOT_PATH='[|\\]'
 # Shapes a JMESPath or jq expression takes and a filename practically never does: an empty or filter bracket, a pipe, an unopened ].
@@ -383,12 +399,63 @@ PREV3=""
 WHERE="the command"
 LITERAL_ONLY=""
 
-# One wording for every hit, so the approver always learns which word, where it sits, and what approving lets happen — see README § What a reader-gate prompt says.
-ask_read() {  # ask_read <word> <what it looks like>
-  ask "READ-SECRET GUARD: flagged \`$1\` in $WHERE — $2. The guard cannot tell whether this command reads that file or only mentions the name as text. Approving runs the command as written: if it does read the file, its contents enter the context/transcript. Approve only if \`$1\` is not a file this command reads." "${3:-ask:literal}"
+# A hook the harness kills at its timeout lets the command run unchecked, so a scan that would overrun asks instead.
+SCAN_DEADLINE=20
+# Tests lower it to exercise the overrun path; it can never be raised past the default.
+[[ ${SECRET_GUARD_SCAN_DEADLINE:-} =~ ^[0-9]+$ ]] && [ "$SECRET_GUARD_SCAN_DEADLINE" -lt "$SCAN_DEADLINE" ] && SCAN_DEADLINE=$SECRET_GUARD_SCAN_DEADLINE
+# Expansion is bounded per command, not per word, or many small brace words add up to the same overrun.
+BRACE_BUDGET=512
+# ASCII A through z, the order bash walks a letter range in, punctuation between the cases included.
+RANGE_CHARS='ABCDEFGHIJKLMNOPQRSTUVWXYZ[\]^_`abcdefghijklmnopqrstuvwxyz'
+
+# Each comma list or range in braces becomes its alternatives, as the shell expands it, so `{*.pem,*.key}` is judged as `*.pem` and `*.key`; anything it cannot expand within budget fails closed.
+expand_braces() {  # expand_braces <word>; fills BRACE_ALTS
+  local pending=("$1") i=0 t pre post rest a b n
+  [ ${#1} -le 4096 ] || return 1
+  local re_list='^(.*)\{([^{}]*,[^{}]*)\}(.*)$' re_range='^(.*)\{([A-Za-z]|-?[0-9]+)\.\.([A-Za-z]|-?[0-9]+)\}(.*)$'
+  BRACE_ALTS=()
+  while [ "$i" -lt ${#pending[@]} ]; do
+    t=${pending[$i]}; i=$((i + 1))
+    [ "$SECONDS" -lt "$SCAN_DEADLINE" ] && [ "$BRACE_BUDGET" -gt 0 ] || return 1
+    if [[ $t =~ $re_list ]]; then
+      pre=${BASH_REMATCH[1]}; post=${BASH_REMATCH[3]}; rest="${BASH_REMATCH[2]},"
+      n=${rest//[^,]/}
+      [ ${#n} -le "$BRACE_BUDGET" ] || return 1
+      while [[ $rest == *,* ]]; do pending+=("${pre}${rest%%,*}${post}"); rest=${rest#*,}; BRACE_BUDGET=$((BRACE_BUDGET - 1)); done
+    elif [[ $t =~ $re_range ]]; then
+      pre=${BASH_REMATCH[1]}; a=${BASH_REMATCH[2]}; b=${BASH_REMATCH[3]}; post=${BASH_REMATCH[4]}
+      if [[ $a == [A-Za-z] && $b == [A-Za-z] ]]; then a=${RANGE_CHARS%%"$a"*}; a=${#a}; b=${RANGE_CHARS%%"$b"*}; b=${#b}; n=chr
+      elif [[ $a =~ ^-?[0-9]{1,6}$ && $b =~ ^-?[0-9]{1,6}$ ]]; then
+        # Read as base 10: a leading zero means octal to bash and `08` aborts the scan; six digits keep the width check below from overflowing.
+        a=$(( ${a%%[0-9]*}10#${a#-} )); b=$(( ${b%%[0-9]*}10#${b#-} )); n=int
+      else return 1; fi
+      [ $(( a > b ? a - b : b - a )) -lt 64 ] || return 1
+      while :; do
+        if [ "$n" = chr ]; then pending+=("${pre}${RANGE_CHARS:a:1}${post}"); else pending+=("${pre}${a}${post}"); fi
+        BRACE_BUDGET=$((BRACE_BUDGET - 1))
+        [ "$a" -eq "$b" ] && break
+        if [ "$a" -lt "$b" ]; then a=$((a + 1)); else a=$((a - 1)); fi
+      done
+    else
+      BRACE_ALTS+=("$t")
+    fi
+    [ $(( ${#pending[@]} - i + ${#BRACE_ALTS[@]} )) -le 64 ] || return 1
+  done
 }
 
-while IFS= read -r -d '' token; do
+# One wording for every hit, so the approver always learns which word, where it sits, and what approving lets happen — see README § What a reader-gate prompt says.
+ask_read() {  # ask_read <word> <what it looks like>
+  local w=$1
+  [ ${#w} -le 200 ] || w="${w:0:200}…"  # the word appears twice in an argv string Linux caps at 128 KB
+  ask "READ-SECRET GUARD: flagged \`$w\` in $WHERE — $2. The guard cannot tell whether this command reads that file or only mentions the name as text. Approving runs the command as written: if it does read the file, its contents enter the context/transcript. Approve only if \`$w\` is not a file this command reads." "${3:-ask:literal}"
+}
+
+# An expansion error aborts this loop and falls through to exit 0, so only a loop that reached the last token may allow.
+SCAN_EOF=""
+while IFS= read -r -d '' token || { SCAN_EOF=1; false; }; do
+  # -u, not <&4: a redirection per token saves and restores fd 0 each time, up to a fifth of the scan's CPU on a large heredoc.
+  if IFS= read -r -u 4 -d '' FLAT_TOKEN; then FLAT_READ=1; else FLAT_READ=""; fi
+  [ "$SECONDS" -lt "$SCAN_DEADLINE" ] || ask "READ-SECRET GUARD: this command is too long to inspect within the hook's time budget, so its arguments were not all checked — confirm before any secret file it reads enters context/transcript." "ask:deadline"
   # \001 starts a command; \002 opens the whole-command bare split, read with no exemption so that text 0.6.5 masked cannot widen it there; \003 closes a substitution, whose next word is an argument, not a command; \004 names where the words after it sit.
   case "$token" in
     $'\001') FIND_ACTIVE=""; PREV=""; PREV2=""; PREV3=""; NO_EXEMPT=""; PROG=""; continue ;;
@@ -425,32 +492,51 @@ while IFS= read -r -d '' token; do
   fi
   # Every token is scanned, grep's pattern operand included: modelling grep's flag grammar to spare that one token cost four fail-opens — see README § Why the pattern operand is scanned.
   case "$token" in
-    --*=*) token=${token#*=} ;;
+    --*=*) token=${token#*=}; FLAT_TOKEN=${FLAT_TOKEN#*=} ;;
   esac
-  # Trailing slashes come off first, so a directory argument still yields the name basename would have given it.
-  BASENAME=${token%"${token##*[!/]}"}
-  BASENAME=${BASENAME##*/}
-  # A glob is not expanded here, so judge the pattern by what it could match rather than by the hook's cwd, which is not necessarily the command's.
-  if [[ $token =~ $RE_GLOB ]]; then
-    [ -n "$LITERAL_ONLY" ] && continue
-    STEM=${token//\*/}; STEM=${STEM//\?/}
-    # Only the text after the last = names a file: an assignment, a URL query or a flag value.
-    GLOB_BASE=${token##*=}; GLOB_BASE=${GLOB_BASE%"${GLOB_BASE##*[!/]}"}; GLOB_BASE=${GLOB_BASE##*/}
-    if [[ $STEM =~ $RE_KEY_PATH ]] || { [[ ! $token =~ $RE_NOT_PATH ]] && [[ ! $GLOB_BASE =~ $RE_QUERY_EXPR ]] \
-         && [[ $GLOB_BASE =~ $RE_GLOB_SECRET ]]; }; then
-      ask_read "$token" "an unresolved wildcard that could match a secret file; $(describe_glob "$token")" "ask:wildcard"
+  BRACE_ALTS=("$token")
+  if [[ $token == *\{*\}* ]] && [[ $token == *,* || $token == *..* ]]; then
+    if ! expand_braces "$token"; then
+      # Past the budget a word asks if a stem, or the start of one, is left once its braces and commas are removed; tr keeps that linear on bash 3.2.
+      FLAT=$FLAT_TOKEN; [ -n "$FLAT_READ" ] || FLAT=$(printf '%s' "$token" | LC_ALL=C tr -d '{},')
+      if [[ $FLAT =~ $RE_STEM_ANY ]] || [[ $FLAT =~ $RE_STEM_FRAG ]] || [[ $FLAT =~ $RE_KEY_PATH ]]; then
+        ask_read "$token" "a brace list or range this gate could not expand within its budget, holding what looks like a secret file name" "ask:wildcard"
+      fi
+      BRACE_ALTS=("$token")
     fi
-    continue
   fi
-  # see README § Which literal names are asked about
-  [[ $BASENAME =~ $RE_QUERY_EXPR ]] && continue
-  if [[ $BASENAME =~ $RE_ENV ]] && [[ ! $BASENAME =~ $RE_ENV_SAMPLE ]]; then
-    ask_read "$token" "it looks like a live env file, which usually holds secrets"
-  fi
-  # Case-insensitive throughout: the matchers name files, and the filesystem this runs on is usually case-insensitive too.
-  if [[ $BASENAME =~ $RE_KEY_NAME ]] || [[ $token =~ $RE_KEY_PATH ]]; then
-    ask_read "$token" "it looks like a private key or kubeconfig"
-  fi
-done <"$TOKENS_FILE"
+  for alt in "${BRACE_ALTS[@]}"; do
+    # A word this long gets one linear match; the trims below run in quadratic time on bash 3.2 and can outlast the hook timeout.
+    if [ ${#alt} -gt 4096 ]; then
+      [[ $alt =~ $RE_STEM_ANY ]] || [[ $alt =~ $RE_KEY_PATH ]] && ask_read "$token" "a word too long to judge by its last path component, holding what looks like a secret file name" "ask:wildcard"
+      continue
+    fi
+    # Trailing slashes come off first, so a directory argument still yields the name basename would have given it.
+    BASENAME=${alt%"${alt##*[!/]}"}
+    BASENAME=${BASENAME##*/}
+    # A glob is not expanded here, so judge the pattern by what it could match rather than by the hook's cwd, which is not necessarily the command's.
+    if [[ $alt =~ $RE_GLOB ]]; then
+      [ -n "$LITERAL_ONLY" ] && continue
+      STEM=${alt//\*/}; STEM=${STEM//\?/}
+      # Only the text after the last = names a file: an assignment, a URL query or a flag value.
+      GLOB_BASE=${alt##*=}; GLOB_BASE=${GLOB_BASE%"${GLOB_BASE##*[!/]}"}; GLOB_BASE=${GLOB_BASE##*/}
+      if [[ $STEM =~ $RE_KEY_PATH ]] || { [[ ! $GLOB_BASE =~ $RE_NOT_PATH ]] && [[ ! $GLOB_BASE =~ $RE_QUERY_EXPR ]] \
+           && [[ $GLOB_BASE =~ $RE_GLOB_SECRET ]]; }; then
+        ask_read "$token" "an unresolved wildcard that could match a secret file; $(describe_glob "$token")" "ask:wildcard"
+      fi
+      continue
+    fi
+    # see README § Which literal names are asked about
+    [[ $BASENAME =~ $RE_QUERY_EXPR ]] && [[ ! $alt =~ $RE_KEY_PATH ]] && continue
+    if [[ $BASENAME =~ $RE_ENV ]] && [[ ! $BASENAME =~ $RE_ENV_SAMPLE ]]; then
+      ask_read "$token" "it looks like a live env file, which usually holds secrets"
+    fi
+    # Case-insensitive throughout: the matchers name files, and the filesystem this runs on is usually case-insensitive too.
+    if [[ $BASENAME =~ $RE_KEY_NAME ]] || [[ $alt =~ $RE_KEY_PATH ]]; then
+      ask_read "$token" "it looks like a private key or kubeconfig"
+    fi
+  done
+done <"$TOKENS_FILE" 4<"${FLAT_FILE:-/dev/null}"
+[ -n "$SCAN_EOF" ] || ask "READ-SECRET GUARD: this command stopped the inspection partway, so its arguments were not all checked — confirm before any secret file it reads enters context/transcript." "ask:aborted"
 
 exit 0
