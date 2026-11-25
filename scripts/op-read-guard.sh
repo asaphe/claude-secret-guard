@@ -1,7 +1,16 @@
 #!/usr/bin/env bash
 # 1Password duplicate-read guard — keys on the parsed secret identity (account, item, fields), never the raw command text, so two fields of one item are distinct reads and a flag reorder is not a new one.
 
-INPUT=$(cat)
+SGA_DIR=${BASH_SOURCE[0]%/*}; [ "$SGA_DIR" != "${BASH_SOURCE[0]}" ] || SGA_DIR=.
+# Run as its own process, nothing has parsed the payload yet, whatever the environment claims.
+[ "${BASH_SOURCE[0]}" != "$0" ] || unset SGA_PREPARSED SGA_INPUT SG_NC_PRIMED
+# Run alone as the PostToolUse hook, this parses with one jq as the authority does; any other shape takes the original route below.
+# shellcheck source-path=SCRIPTDIR
+[ -n "${SGA_PREPARSED:-}" ] || { [ -f "$SGA_DIR/hook-payload.sh" ] && [ -r "$SGA_DIR/hook-payload.sh" ] && . "$SGA_DIR/hook-payload.sh" 2>/dev/null && sg_read_payload && sg_parse_payload 2>/dev/null; } || :
+if [ -n "${SGA_PREPARSED:-}" ]; then
+  INPUT=$SGA_INPUT; HOOK_EVENT=$SGA_EVENT
+else
+INPUT=${SGA_INPUT-$(cat)}
 # An empty or non-object payload parses without error and yields an empty value, which every check below reads as "nothing to inspect" — see README § Failing closed.
 if [ -z "$INPUT" ] || ! printf '%s' "$INPUT" | jq -e 'type == "object"' >/dev/null 2>&1; then
   echo "OP-READ GUARD: cannot read the hook payload — it is empty, not a JSON object, or jq is missing. Blocking: the guard cannot confirm this command is safe." >&2
@@ -12,6 +21,7 @@ if ! HOOK_EVENT=$(printf '%s' "$INPUT" | jq -r '.hook_event_name // empty' 2>/de
   echo "OP-READ GUARD: cannot read the hook payload — jq is missing or the JSON did not parse. Refusing: the guard cannot confirm this command is safe." >&2
   exit 2
 fi
+fi
 
 # The same refusal means different things on the two events, and claiming a block on the post-run pass tells the caller to retry a read that already happened — spending a second biometric prompt for a value they are already holding.
 if [ "$HOOK_EVENT" = "PostToolUse" ]; then
@@ -20,6 +30,9 @@ else
   CONSEQUENCE="Blocking: the guard cannot confirm this command is safe."
 fi
 
+if [ -n "${SGA_PREPARSED:-}" ]; then
+  CMD=$SGA_CMD; SESSION_ID=$SGA_SESSION
+else
 # Blocks rather than allows: jq failing here yields an empty value that every check below reads as "nothing to inspect", silently disarming the guard.
 if ! CMD=$(printf '%s' "$INPUT" | jq -r '.tool_input.command // empty' 2>/dev/null); then
   echo "OP-READ GUARD: cannot read the hook payload — jq is missing or the JSON did not parse. $CONSEQUENCE" >&2
@@ -29,22 +42,22 @@ if ! SESSION_ID=$(printf '%s' "$INPUT" | jq -r '.session_id // empty' 2>/dev/nul
   echo "OP-READ GUARD: cannot read the hook payload — jq is missing or the JSON did not parse. $CONSEQUENCE" >&2
   exit 2
 fi
+fi
 
 if [ -z "$CMD" ]; then
   exit 0
 fi
 
 # shellcheck source-path=SCRIPTDIR
-source "$(dirname "${BASH_SOURCE[0]}")/strip-cmd.sh"
+source "$SGA_DIR/strip-cmd.sh"
+# Both predicates below need the word op, so a command that cannot spell it is cleared without a subprocess.
+norm_may_re SG_MAY_OP op
+norm_may_hold "$CMD" "$SG_MAY_OP" || exit 0
 # Same normalization the mask guard matches on, so `op "item" get` keys the same entry as `op item get` rather than fetching twice.
 RAW_CMD=${CMD//\\$'\n'/}
 CMD=$(normalize_cmd "$CMD")
 
-if ! printf '%s\n' "$CMD" | grep -qE '(^|[^[:alnum:]_-])op[[:space:]]([^|;&]* )?read([[:space:]]|$)'; then
-  if ! printf '%s\n' "$CMD" | grep -qE '(^|[^[:alnum:]_-])op[[:space:]]([^|;&]* )?item +get([[:space:]]|$)'; then
-    exit 0
-  fi
-fi
+printf '%s\n' "$CMD" | grep -qE '(^|[^[:alnum:]_-])op[[:space:]]([^|;&]* )?read([[:space:]]|$)|(^|[^[:alnum:]_-])op[[:space:]]([^|;&]* )?item +get([[:space:]]|$)' || exit 0
 
 # printf is named rather than xargs' default echo, whose GNU build reads --help/--version/-n as its own flags and rewrites the token stream; quoting rules still apply so a quoted --fields value stays one token.
 # A newline terminates a command exactly as `;` does, but xargs flattens it away — without this the segments merge and a reference printed on one line keys a fetch on another; a trailing backslash is a continuation, so it gets no separator.
@@ -161,7 +174,7 @@ fi
 [ -n "$KEYS" ] || exit 0
 
 # shellcheck source-path=SCRIPTDIR
-source "$(dirname "${BASH_SOURCE[0]}")/session-namespace.sh"
+source "$SGA_DIR/session-namespace.sh"
 # No fixed "shared" fallback: that name was the same for every user, so on a sticky /tmp the first to create it locked everyone else out through the ownership refusal below, with no way to remove it.
 [ -n "$SESSION_ID" ] || SESSION_ID=$(session_namespace)
 TRACK_FILE="/tmp/claude-op-reads-${SESSION_ID}"

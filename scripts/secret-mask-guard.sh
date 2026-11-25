@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 # Blocks a raw `op read <uri>` or single-secret `aws secretsmanager get-secret-value --secret-id <id>` call and suggests the masked wrapper instead, so the value never has to reach the tool_result/transcript in the first place — see README § Masked-cache wrappers.
 
+# Pre-parsed by bash-secret-authority.sh, which validated the payload with this stage's own messages — see README § Process launches per call.
+if [ -n "${SGA_PREPARSED:-}" ]; then
+  INPUT=$SGA_INPUT; CMD=$SGA_CMD
+else
 INPUT=$(cat)
 # An empty or non-object payload parses without error and yields an empty command, which every check below reads as "nothing to inspect" — see README § Failing closed.
 if [ -z "$INPUT" ] || ! printf '%s' "$INPUT" | jq -e 'type == "object"' >/dev/null 2>&1; then
@@ -12,16 +16,22 @@ if ! CMD=$(printf '%s' "$INPUT" | jq -r '.tool_input.command // empty' 2>/dev/nu
   echo "SECRET-MASK GUARD: cannot read the hook payload — jq is missing or the JSON did not parse. Blocking: the guard cannot confirm this command is safe." >&2
   exit 2
 fi
+fi
 
 if [ -z "$CMD" ]; then
   exit 0
 fi
 
+SGA_DIR=${BASH_SOURCE[0]%/*}; [ "$SGA_DIR" != "${BASH_SOURCE[0]}" ] || SGA_DIR=.
 # shellcheck source-path=SCRIPTDIR
-source "$(dirname "${BASH_SOURCE[0]}")/strip-cmd.sh"
+source "$SGA_DIR/strip-cmd.sh"
 
 # Matched on normalized text: a continuation, an escape or a quote inside the phrase changes the bytes without changing what the shell runs.
 SCAN=$(normalize_cmd "$CMD")
+# Gates over the raw text that skip a grep which provably cannot match — see README § Process launches per call.
+norm_may_re SG_MAY_OP op
+norm_may_re SG_MAY_OP_SUB get run inject
+norm_may_re SG_MAY_SM secretsmanager
 
 # Anchored to the subcommand position rather than to "anywhere after op": only op's own global flags and their values may precede it, or a word that happens to be spelled like a subcommand reads as one. The flag names are a closed set, so `git log --grep op --grep read` is not an op invocation.
 # A value may be a quoted run holding whitespace — `--config "/Application Support/op"` is an ordinary spelling, and a matcher that stopped at the first space silenced every predicate below.
@@ -38,126 +48,139 @@ sg_tail_clear() {
 }
 
 # No wrapper-path early exit: a legitimate wrapper call does not match the fetch patterns below anyway, so all it could exempt was text that merely named the path — a trailing `# see scripts/op-cache.sh` used to clear the whole guard.
-# --- op read <uri> ---
-# Not conditioned on the absence of `op item get` (one command can carry both), and word-anchored so `stop read` and `loop read` are not an op invocation.
-if printf '%s\n' "$SCAN" | grep -qE "${OP_PRE}read([[:space:]]|\$)"; then
-  URI=$(printf '%s\n' "$CMD" | grep -oE 'op://[^ "'"'"']+' | head -1)
-  if [ -n "$URI" ]; then
-    echo "SECRET-MASK GUARD: raw 'op read' would put the value in this tool_result/transcript. Use the masked wrapper instead: \"${CLAUDE_PLUGIN_ROOT}\"/scripts/op-cache.sh --mask '$URI' — then reference the value downstream via \$(cat <the printed cache path>), never the literal." >&2
-  else
-    echo "SECRET-MASK GUARD: raw 'op read' would put the value in this tool_result/transcript. Use \"${CLAUDE_PLUGIN_ROOT}\"/scripts/op-cache.sh --mask <uri> instead, then reference the cached file downstream — never the literal value." >&2
+# Every predicate in this section needs the word op, so a command that cannot spell it skips the section before any grep.
+SG_OP_OPEN=""
+norm_may_hold "$CMD" "$SG_MAY_OP" && SG_OP_OPEN=1
+if [ -n "$SG_OP_OPEN" ]; then
+  # --- op read <uri> ---
+  # One grep instead of three for a command that names op without running any of these; each predicate below still decides on its own.
+  SG_OP_ANY=""
+  printf '%s\n' "$SCAN" | grep -qE "${OP_PRE}read([[:space:]]|\$)|${OP_PRE}item[[:space:]]+get([[:space:]]|\$)|${OP_PRE}run([[:space:]]|\$)" && SG_OP_ANY=1
+  # Not conditioned on the absence of `op item get` (one command can carry both), and word-anchored so `stop read` and `loop read` are not an op invocation.
+  if [ -n "$SG_OP_ANY" ] && printf '%s\n' "$SCAN" | grep -qE "${OP_PRE}read([[:space:]]|\$)"; then
+    URI=$(printf '%s\n' "$CMD" | grep -oE 'op://[^ "'"'"']+' | head -1)
+    if [ -n "$URI" ]; then
+      echo "SECRET-MASK GUARD: raw 'op read' would put the value in this tool_result/transcript. Use the masked wrapper instead: \"${CLAUDE_PLUGIN_ROOT}\"/scripts/op-cache.sh --mask '$URI' — then reference the value downstream via \$(cat <the printed cache path>), never the literal." >&2
+    else
+      echo "SECRET-MASK GUARD: raw 'op read' would put the value in this tool_result/transcript. Use \"${CLAUDE_PLUGIN_ROOT}\"/scripts/op-cache.sh --mask <uri> instead, then reference the cached file downstream — never the literal value." >&2
+    fi
+    exit 2
   fi
-  exit 2
 fi
-
-# --- the other 1Password subcommands that print a value ---
-# &> and >& are redirect operators, not command separators, so they are hidden from the split and restored inside the segment.
-# Restored through a variable, never as a literal: bash 5.2 made a bare & in a replacement expand to the matched text, so the literal spelling silently produces different output on either side of that release.
-SG_AMPGT='&>'
-SG_SQ="'"
-SG_GTAMP='>&'
-SEG_SRC=${CMD//&>/$'\001'}
-SEG_SRC=${SEG_SRC//>&/$'\002'}
-# Decided per segment: the flag that makes each of these dangerous has to belong to the same command, or `op item get X && op-cache.sh --reveal <uri>` reads as a revealing item-get.
-sg_pair_check() {
-  if printf '%s\n' "$1" | grep -qE "${OP_PRE}item[[:space:]]+get([[:space:]]|\$)" \
-     && printf '%s\n' "$1" | grep -qE '(^|[[:space:]])--(reveal|otp)([[:space:]=]|$)'; then
-    echo "SECRET-MASK GUARD: 'op item get' with --reveal or --otp prints the concealed value into this tool_result/transcript. Fetch the one field you need as a secret reference through the masked wrapper instead: \"${CLAUDE_PLUGIN_ROOT}\"/scripts/op-cache.sh --mask 'op://<vault>/<item>/<field>' — or drop the flag and the field stays concealed." >&2
-    exit 2
+# A block of its own: bash 3.2 in posix mode cannot parse the `< <(…)` below, and the op read check above has always run before that error.
+if [ -n "$SG_OP_OPEN" ]; then
+  # --- the other 1Password subcommands that print a value ---
+  # &> and >& are redirect operators, not command separators, so they are hidden from the split and restored inside the segment.
+  # Restored through a variable, never as a literal: bash 5.2 made a bare & in a replacement expand to the matched text, so the literal spelling silently produces different output on either side of that release.
+  SG_AMPGT='&>'
+  SG_SQ="'"
+  SG_GTAMP='>&'
+  SEG_SRC=${CMD//&>/$'\001'}
+  SEG_SRC=${SEG_SRC//>&/$'\002'}
+  # Decided per segment: the flag that makes each of these dangerous has to belong to the same command, or `op item get X && op-cache.sh --reveal <uri>` reads as a revealing item-get.
+  sg_pair_check() {
+    if printf '%s\n' "$1" | grep -qE "${OP_PRE}item[[:space:]]+get([[:space:]]|\$)" \
+       && printf '%s\n' "$1" | grep -qE '(^|[[:space:]])--(reveal|otp)([[:space:]=]|$)'; then
+      echo "SECRET-MASK GUARD: 'op item get' with --reveal or --otp prints the concealed value into this tool_result/transcript. Fetch the one field you need as a secret reference through the masked wrapper instead: \"${CLAUDE_PLUGIN_ROOT}\"/scripts/op-cache.sh --mask 'op://<vault>/<item>/<field>' — or drop the flag and the field stays concealed." >&2
+      exit 2
+    fi
+    if printf '%s\n' "$1" | grep -qE "${OP_PRE}run([[:space:]]|\$)" \
+       && printf '%s\n' "$1" | grep -qE '(^|[[:space:]])--no-masking([[:space:]=]|$)'; then
+      echo "SECRET-MASK GUARD: 'op run --no-masking' turns off the masking op applies to the subprocess's stdout and stderr, so anything the command echoes lands in this tool_result/transcript. Drop the flag." >&2
+      exit 2
+    fi
+  }
+  # A second split that leaves a quoted ; & or newline alone, so a quoted value such as --title 'a;b' cannot cut a fetch off from its own flag; only the pair checks read it, since a longer segment could lend a fetch someone else's destination.
+  if [ -n "$SG_OP_ANY" ] && { { printf '%s\n' "$SCAN" | grep -qE "${OP_PRE}item[[:space:]]+get([[:space:]]|\$)" && printf '%s\n' "$SCAN" | grep -qE '(^|[[:space:]])--(reveal|otp)([[:space:]=]|$)'; } \
+     || { printf '%s\n' "$SCAN" | grep -qE "${OP_PRE}run([[:space:]]|\$)" && printf '%s\n' "$SCAN" | grep -qE '(^|[[:space:]])--no-masking([[:space:]=]|$)'; }; }; then
+    while IFS= read -r SEG_RAW; do
+      SEG_RAW=${SEG_RAW//$'\001'/"$SG_AMPGT"}
+      SEG_RAW=${SEG_RAW//$'\002'/"$SG_GTAMP"}
+      { norm_may_hold "$SEG_RAW" "$SG_MAY_OP" && norm_may_hold "$SEG_RAW" "$SG_MAY_OP_SUB"; } || continue
+      sg_pair_check "$(normalize_cmd "$SEG_RAW")"
+    done < <(printf '%s\n' "$SEG_SRC" | awk -v sq="'" '
+      {
+        n = length($0); cont = 0
+        for (i = 1; i <= n; i++) {
+          c = substr($0, i, 1)
+          if (q != sq && c == "\\") { if (i == n) { cont = 1; break }; cur = cur c substr($0, i + 1, 1); i++; continue }
+          if (q == "") {
+            if (c == ";" || c == "&") { print cur; cur = ""; continue }
+            if (c == "\"" || c == sq) q = c
+          } else if (c == q) q = ""
+          cur = cur c
+        }
+        if (q == "" && !cont) { print cur; cur = "" } else cur = cur " "
+      }
+      END { print cur }')
   fi
-  if printf '%s\n' "$1" | grep -qE "${OP_PRE}run([[:space:]]|\$)" \
-     && printf '%s\n' "$1" | grep -qE '(^|[[:space:]])--no-masking([[:space:]=]|$)'; then
-    echo "SECRET-MASK GUARD: 'op run --no-masking' turns off the masking op applies to the subprocess's stdout and stderr, so anything the command echoes lands in this tool_result/transcript. Drop the flag." >&2
-    exit 2
-  fi
-}
-# A second split that leaves a quoted ; & or newline alone, so a quoted value such as --title 'a;b' cannot cut a fetch off from its own flag; only the pair checks read it, since a longer segment could lend a fetch someone else's destination.
-if { printf '%s\n' "$SCAN" | grep -qE "${OP_PRE}item[[:space:]]+get([[:space:]]|\$)" && printf '%s\n' "$SCAN" | grep -qE '(^|[[:space:]])--(reveal|otp)([[:space:]=]|$)'; } \
-   || { printf '%s\n' "$SCAN" | grep -qE "${OP_PRE}run([[:space:]]|\$)" && printf '%s\n' "$SCAN" | grep -qE '(^|[[:space:]])--no-masking([[:space:]=]|$)'; }; then
+  # Split on the raw text and normalized per segment, so the two views stay paired and the flag checks below read a segment nothing has rewritten.
   while IFS= read -r SEG_RAW; do
     SEG_RAW=${SEG_RAW//$'\001'/"$SG_AMPGT"}
     SEG_RAW=${SEG_RAW//$'\002'/"$SG_GTAMP"}
-    sg_pair_check "$(normalize_cmd "$SEG_RAW")"
-  done < <(printf '%s\n' "$SEG_SRC" | awk -v sq="'" '
-    {
-      n = length($0); cont = 0
-      for (i = 1; i <= n; i++) {
-        c = substr($0, i, 1)
-        if (q != sq && c == "\\") { if (i == n) { cont = 1; break }; cur = cur c substr($0, i + 1, 1); i++; continue }
-        if (q == "") {
-          if (c == ";" || c == "&") { print cur; cur = ""; continue }
-          if (c == "\"" || c == sq) q = c
-        } else if (c == q) q = ""
-        cur = cur c
-      }
-      if (q == "" && !cont) { print cur; cur = "" } else cur = cur " "
-    }
-    END { print cur }')
-fi
-# Split on the raw text and normalized per segment, so the two views stay paired and the flag checks below read a segment nothing has rewritten.
-while IFS= read -r SEG_RAW; do
-  SEG_RAW=${SEG_RAW//$'\001'/"$SG_AMPGT"}
-  SEG_RAW=${SEG_RAW//$'\002'/"$SG_GTAMP"}
-  SEG=$(normalize_cmd "$SEG_RAW")
-  sg_pair_check "$SEG"
+    # A heredoc is a segment per line, and a sed plus three greps on each one is what outran the hook timeout.
+    { norm_may_hold "$SEG_RAW" "$SG_MAY_OP" && norm_may_hold "$SEG_RAW" "$SG_MAY_OP_SUB"; } || continue
+    SEG=$(normalize_cmd "$SEG_RAW")
+    sg_pair_check "$SEG"
 
-  printf '%s\n' "$SEG" | grep -qE "${OP_PRE}(document[[:space:]]+get|inject)([[:space:]]|\$)" || continue
-  # Only what follows the subcommand can be its own output flag; an -o earlier on the line belongs to another command, as in `ssh -o X host "op document get k"`.
-  # Cut where the anchored pattern matched, not at the first literal spelling: `cat inject.tpl | op inject -i -` cut inside the filename, and the tail then held cat's pipe rather than op's own.
-  # Read from the raw segment with quote state tracked: normalization deletes the quotes that tell a redirect operator apart from an argument merely spelled like one, and a regex cannot pair quotes — blanking them with one ate the --reveal flag two checks above.
-  # Only the characters that could FORM an operator are neutralized inside a quoted run, so `> "/dev/stdout"` still names stdout while `--tags "-o /x"` names nothing; a run that is exactly a dash is the stdout operand and survives.
-  SEG_ONE=$(printf '%s' "$SEG_RAW" | tr -s '[:space:]' ' ')
-  SEG_QSUB="[\"$SG_SQ]?"
-  SEG_PAT="${OP_PRE}${SEG_QSUB}(document${SEG_QSUB}[[:space:]]+${SEG_QSUB}get|inject)${SEG_QSUB}"
-  # Every occurrence's tail is printed behind a T, so an empty one survives, and read both plain and escape-aware; every reading must name a destination — see README § What this plugin does not do.
-  SEG_TAILS=$(printf '%s' "$SEG_ONE" | awk -v pat="$SEG_PAT" -v sq="'" '
-    function scan(tail, esc,   out, q, buf, i, c) {
-      out = ""; q = ""; buf = ""
-      for (i = 1; i <= length(tail); i++) {
-        c = substr(tail, i, 1)
-        if (esc && c == "\\" && q != sq) { if (q == "") out = out "xx"; else buf = buf "xx"; i++; continue }
-        if (q == "") {
-          if (c == "\"" || c == sq) { q = c; buf = ""; continue }
-          if (c == "#" && (i == 1 || substr(tail, i - 1, 1) == " ")) break
-          out = out c
-        } else if (c == q) {
-          q = ""
-          if (buf != "-") gsub(/[-<>&|#]/, "x", buf)
-          out = out " " buf " "
-          buf = ""
-        } else buf = buf c
+    printf '%s\n' "$SEG" | grep -qE "${OP_PRE}(document[[:space:]]+get|inject)([[:space:]]|\$)" || continue
+    # Only what follows the subcommand can be its own output flag; an -o earlier on the line belongs to another command, as in `ssh -o X host "op document get k"`.
+    # Cut where the anchored pattern matched, not at the first literal spelling: `cat inject.tpl | op inject -i -` cut inside the filename, and the tail then held cat's pipe rather than op's own.
+    # Read from the raw segment with quote state tracked: normalization deletes the quotes that tell a redirect operator apart from an argument merely spelled like one, and a regex cannot pair quotes — blanking them with one ate the --reveal flag two checks above.
+    # Only the characters that could FORM an operator are neutralized inside a quoted run, so `> "/dev/stdout"` still names stdout while `--tags "-o /x"` names nothing; a run that is exactly a dash is the stdout operand and survives.
+    SEG_ONE=$(printf '%s' "$SEG_RAW" | tr -s '[:space:]' ' ')
+    SEG_QSUB="[\"$SG_SQ]?"
+    SEG_PAT="${OP_PRE}${SEG_QSUB}(document${SEG_QSUB}[[:space:]]+${SEG_QSUB}get|inject)${SEG_QSUB}"
+    # Every occurrence's tail is printed behind a T, so an empty one survives, and read both plain and escape-aware; every reading must name a destination — see README § What this plugin does not do.
+    SEG_TAILS=$(printf '%s' "$SEG_ONE" | awk -v pat="$SEG_PAT" -v sq="'" '
+      function scan(tail, esc,   out, q, buf, i, c) {
+        out = ""; q = ""; buf = ""
+        for (i = 1; i <= length(tail); i++) {
+          c = substr(tail, i, 1)
+          if (esc && c == "\\" && q != sq) { if (q == "") out = out "xx"; else buf = buf "xx"; i++; continue }
+          if (q == "") {
+            if (c == "\"" || c == sq) { q = c; buf = ""; continue }
+            if (c == "#" && (i == 1 || substr(tail, i - 1, 1) == " ")) break
+            out = out c
+          } else if (c == q) {
+            q = ""
+            if (buf != "-") gsub(/[-<>&|#]/, "x", buf)
+            out = out " " buf " "
+            buf = ""
+          } else buf = buf c
+        }
+        if (q != "") { gsub(/[-<>&|#]/, "x", buf); out = out " " buf }
+        return out
       }
-      if (q != "") { gsub(/[-<>&|#]/, "x", buf); out = out " " buf }
-      return out
-    }
-    {
-      s = $0
-      while (match(s, pat)) {
-        tail = substr(s, RSTART + RLENGTH)
-        s = tail
-        print "T" scan(tail, 0)
-        print "T" scan(tail, 1)
-      }
-    }')
-  # No tail at all means the raw text never matched, and that is not a destination either.
-  SEG_OPEN=""
-  [ -n "$SEG_TAILS" ] || SEG_OPEN=1
-  while [ -z "$SEG_OPEN" ] && IFS= read -r SEG_TAIL; do
-    sg_tail_clear "${SEG_TAIL#T}" || SEG_OPEN=1
-  done <<<"$SEG_TAILS"
-  [ -n "$SEG_OPEN" ] || continue
-  echo "SECRET-MASK GUARD: 'op document get' and 'op inject' print the resolved secret to stdout, which is this tool_result/transcript. Give it somewhere else to go — --out-file <path> (op creates that file 0600), a redirect, or a pipe into whatever consumes it." >&2
-  exit 2
-done < <(printf '%s\n' "$SEG_SRC" | tr ';&' '\n')
+      {
+        s = $0
+        while (match(s, pat)) {
+          tail = substr(s, RSTART + RLENGTH)
+          s = tail
+          print "T" scan(tail, 0)
+          print "T" scan(tail, 1)
+        }
+      }')
+    # No tail at all means the raw text never matched, and that is not a destination either.
+    SEG_OPEN=""
+    [ -n "$SEG_TAILS" ] || SEG_OPEN=1
+    while [ -z "$SEG_OPEN" ] && IFS= read -r SEG_TAIL; do
+      sg_tail_clear "${SEG_TAIL#T}" || SEG_OPEN=1
+    done <<<"$SEG_TAILS"
+    [ -n "$SEG_OPEN" ] || continue
+    echo "SECRET-MASK GUARD: 'op document get' and 'op inject' print the resolved secret to stdout, which is this tool_result/transcript. Give it somewhere else to go — --out-file <path> (op creates that file 0600), a redirect, or a pipe into whatever consumes it." >&2
+    exit 2
+  done < <(printf '%s\n' "$SEG_SRC" | tr ';&' '\n')
+fi
 
 # --- aws secretsmanager batch-get-secret-value (bulk fetch, many values at once) ---
-if printf '%s\n' "$SCAN" | grep -qE '(^|[^[:alnum:]_-])(aws|rtk aws)[[:space:]]([^|;&]* )?secretsmanager[[:space:]]+batch-get-secret-value([[:space:]]|$)'; then
+if norm_may_hold "$CMD" "$SG_MAY_SM" && printf '%s\n' "$SCAN" | grep -qE '(^|[^[:alnum:]_-])(aws|rtk aws)[[:space:]]([^|;&]* )?secretsmanager[[:space:]]+batch-get-secret-value([[:space:]]|$)'; then
   echo "SECRET-MASK GUARD: raw 'batch-get-secret-value' would put every fetched value in this tool_result/transcript. Use the masked bulk reader instead: \"${CLAUDE_PLUGIN_ROOT}\"/scripts/aws-batch-secrets.sh --filter <prefix> --values — prints names + byte-lengths only; add --reveal to opt into full values when genuinely needed." >&2
   exit 2
 fi
 
 # --- aws secretsmanager get-secret-value --secret-id <id> (single-secret only) ---
-if printf '%s\n' "$SCAN" | grep -qE '(^|[^[:alnum:]_-])(aws|rtk aws)[[:space:]]([^|;&]* )?secretsmanager[[:space:]]+get-secret-value([[:space:]]|$)'; then
+if norm_may_hold "$CMD" "$SG_MAY_SM" && printf '%s\n' "$SCAN" | grep -qE '(^|[^[:alnum:]_-])(aws|rtk aws)[[:space:]]([^|;&]* )?secretsmanager[[:space:]]+get-secret-value([[:space:]]|$)'; then
   SECRET_ID=$(printf '%s\n' "$CMD" | grep -oE -- '--secret-id[[:space:]=]+[^[:space:]]+' | sed -E 's/^--secret-id[[:space:]=]+//' | tr -d '"'"'"'')
   if [ -n "$SECRET_ID" ]; then
     echo "SECRET-MASK GUARD: raw 'get-secret-value' would put the value in this tool_result/transcript. Use the masked wrapper instead: \"${CLAUDE_PLUGIN_ROOT}\"/scripts/sm-cache.sh --mask '$SECRET_ID' — then reference the value downstream via \$(cat <the printed cache path>) or jq against it, never the literal." >&2
@@ -288,10 +311,19 @@ SG_DEPTH=${SG_BODY_DEPTH:-0}
 SG_PFX='([A-Za-z_][A-Za-z0-9_]*=[^[:space:]]*|sudo|env|exec|time|nohup|-[^[:space:]]*([[:space:]]+[^-[:space:]][^[:space:]]*)?)[[:space:]]+'
 SG_INV='(^|[[:space:];&|(])([^[:space:];&|()]*/)?((ba|z|k|da)?sh|source)[[:space:]]|(^|[[:space:];&|(])\.[[:space:]]|(^|[;&|(]|&&|\|\|)[[:space:]]*('"$SG_PFX"')*(\.{1,2}/|/|~/)'
 # Newlines become separators for the gate test only: bash anchors =~ to the string rather than the line, so a direct-path run on line 2 matched nothing, and a literal newline cannot go in the pattern because grep -E reads one as a pattern separator and the bracket it sits in would split across two.
-SG_GATE=${CMD//$'\n'/;}
+case $CMD in
+  *$'\n'*)
+    # shellcheck disable=SC2031  # tr, not ${CMD//$'\n'/;} (~50 s on bash 3.2 for 500 lines); C by export, as lastpipe would restore LC_ALL=C on tr here
+    SG_GATE=$(export LC_ALL=C; printf '%s' "$CMD" | tr '\n' ';') ;;
+  *) SG_GATE=$CMD ;;
+esac
 # The invoked script, then what that script sources: deeper needs a case where a sourced file's own sourced file carries the fetch, and each level costs a scan of every candidate.
 if [ "$SG_DEPTH" -lt 2 ] && [[ $SG_GATE =~ $SG_INV ]]; then
-  SG_BASE=${SG_BODY_BASE:-$(printf '%s' "$INPUT" | jq -r '.cwd // empty' 2>/dev/null)}
+  if [ -n "${SGA_PREPARSED:-}" ]; then
+    SG_BASE=${SG_BODY_BASE:-$SGA_CWD}
+  else
+    SG_BASE=${SG_BODY_BASE:-$(printf '%s' "$INPUT" | jq -r '.cwd // empty' 2>/dev/null)}
+  fi
   [ -n "$SG_BASE" ] || SG_BASE=$PWD
   SG_TEXT=$CMD
   # Collapsed to one token first: the whitespace inside the substitution would otherwise split the sibling path it builds into two words.
@@ -299,7 +331,7 @@ if [ "$SG_DEPTH" -lt 2 ] && [[ $SG_GATE =~ $SG_INV ]]; then
     SG_TEXT=$(printf '%s' "$CMD" | sed -E 's/\$\((cd[[:space:]]+)?dirname[^)]*\)/SG_BASEDIR/g; s/\$\{(BASH_SOURCE(\[0\])?|0)%\/\*\}/SG_BASEDIR/g' 2>/dev/null) || SG_TEXT=$CMD
   fi
   # This plugin's own tree is exempt by resolved path: the masked wrappers perform the fetch on purpose and mask what they print, and the tests carry guarded command text as data. A path comparison, so a comment naming one of these files cannot claim the exemption the way a text match would.
-  SG_OWN=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd -P)
+  SG_OWN=$(cd "$SGA_DIR/.." 2>/dev/null && pwd -P)
 
   # Guarded on the root resolving: without it the exemption below cannot fire and the scan would block this plugin's own wrappers, so losing the scan is the better of the two failures.
   while [ -n "$SG_OWN" ] && IFS= read -r SG_TOK; do
@@ -307,7 +339,12 @@ if [ "$SG_DEPTH" -lt 2 ] && [[ $SG_GATE =~ $SG_INV ]]; then
     SG_FILE=$(sg_resolve "$SG_TOK" "$SG_BASE")
     [ -f "$SG_FILE" ] || continue
     [ -r "$SG_FILE" ] || continue
-    SG_DIR=$(cd "$(dirname "$SG_FILE")" 2>/dev/null && pwd -P) || continue
+    case $SG_FILE in
+      # dirname reads a leading dash as an option: its error, and the directory cd falls back to, are what this path has always produced.
+      -*) SG_DIR=$(cd "$(dirname "$SG_FILE")" 2>/dev/null && pwd -P) || continue ;;
+      # sg_resolve always yields a path with a slash, and the trailing one keeps a file at / resolving to / rather than to "".
+      *) SG_DIR=$(cd "${SG_FILE%/*}/" 2>/dev/null && pwd -P) || continue ;;
+    esac
     case "$SG_DIR" in "$SG_OWN" | "$SG_OWN"/*) continue ;; esac
     SG_BODY=$(sg_script_body "$SG_FILE") || continue
     [ -n "$SG_BODY" ] || continue
