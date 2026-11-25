@@ -336,6 +336,11 @@ run ASK "brace list as an --include value"       "grep -r KEY --include={*.env,*
 run ASK "editor backup of a key glob"            "cat *.key~"
 run ASK "pipe in a directory before a key glob"  'cat "a|b"/*.pem'
 run SILENT "brace list with no secret name"        "cat {*.log,*.txt}"
+# bash skips a } with no comma before it, so this expands to `a}` and `.env`, which no list match here reproduces.
+run ASK "brace list past an unpaired close brace" "cat {a},.env}"
+run SILENT "unpaired close brace, no secret name"  "cat {a},b.txt}"
+run ASK "brace list around a nested pair"         "cat {x.key,b{c}}"
+run SILENT "unpaired braces in a query expression" "jq -r '{a},.key}[]' f.json"
 run ASK "literal brace list of env files"       "cat .env{,.local}"
 run ASK "literal brace list of key names"       "cat id_{rsa,ed25519}"
 run ASK "literal brace list of key extensions"  "cat server.{pem,crt}"

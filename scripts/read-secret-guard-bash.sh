@@ -3,7 +3,7 @@
 
 # First, and in ASCII: an option or locale inherited from the environment changes how every line below runs - see README § Inherited options and locales.
 set +o keyword +o noclobber
-_sg_mb=$'\xe2\x80\x94'; [ ${#_sg_mb} -eq 1 ] || { printf -v _sg_mb '\\x%x' {128..255}; printf -v _sg_mb '%b' "$_sg_mb"; [ ${#_sg_mb} -eq 128 ]; } || { _sg_mb=$'\xe4\x5c'; [ ${#_sg_mb} -ne 1 ] || SG_ASCII_TRAIL=1; LC_ALL=C; export LC_ALL SG_ASCII_TRAIL; }
+[ "${LC_ALL:-}" = C ] || unset SG_ASCII_TRAIL; _sg_mb=$'\xe2\x80\x94'; [ ${#_sg_mb} -eq 1 ] || { printf -v _sg_mb '\\x%x' {128..255}; printf -v _sg_mb '%b' "$_sg_mb"; [ ${#_sg_mb} -eq 128 ]; } || { _sg_mb=$'\xe4\x5c'; [ ${#_sg_mb} -ne 1 ] || SG_ASCII_TRAIL=1; LC_ALL=C; export LC_ALL SG_ASCII_TRAIL; }
 
 if [ -n "${SGA_PREPARSED:-}" ]; then
   INPUT=$SGA_INPUT; CMD=$SGA_CMD
@@ -26,17 +26,6 @@ SGA_DIR=${BASH_SOURCE[0]%/*}; [ "$SGA_DIR" != "${BASH_SOURCE[0]}" ] || SGA_DIR=.
 # shellcheck source-path=SCRIPTDIR
 source "$SGA_DIR/strip-cmd.sh"
 
-# Matched anywhere inside a segment rather than after a fixed wrapper list, which would go silent on any prefix the list omits (timeout, nice, stdbuf, ionice, doas); a separator bounds a reader name exactly as a line end does.
-SEP=$';&|()`"\''
-# The gate below needs a reader's name, so a command that cannot spell one is cleared before any grep.
-norm_may_re SG_MAY_READER cat head tail less more grep
-norm_may_hold "$CMD" "$SG_MAY_READER" || exit 0
-# Normalized like the mask guard's predicates, or a quoted reader name (`"cat" secrets.pem`) splits into its own segment with no trailing space and matches nothing.
-GATE_CMD=$(normalize_cmd "$CMD")
-# A leading slash admits the same reader named by path, and grep carries no recursive-flag condition: -r decides how many files are read, never whether the one named is a key — see README § Why grep is gated unconditionally.
-printf '%s' "$GATE_CMD" | grep -qE "(^|[[:space:]/$SEP])(cat|head|tail|less|more|grep)([[:space:]<$SEP]|\$)" \
-  || exit 0
-
 ask() {
   local log session flat
   log=${HOOK_DIAG_ASK_LOG:-${HOME}/.claude/local/hook-ask-decisions.log}
@@ -56,16 +45,29 @@ ask() {
   exit 0
 }
 
+# Where the decoder joins an ASCII byte, a quote, separator or space included, to the character before it, the shell parses such a command unlike any C scan here.
+if [ -n "${SG_ASCII_TRAIL:-}" ]; then
+  case $CMD in
+    *[$'\200'-$'\377']*) ask "READ-SECRET GUARD: under this locale the shell can read an ASCII character right after a non-ASCII one, even a quote, a ; or a space, as part of that character, so it may split and run this command differently than this guard reads it, and a secret it reads could go unflagged. Confirm before running it." "ask:inspection" ;;
+  esac
+fi
+
+# Matched anywhere inside a segment rather than after a fixed wrapper list, which would go silent on any prefix the list omits (timeout, nice, stdbuf, ionice, doas); a separator bounds a reader name exactly as a line end does.
+SEP=$';&|()`"\''
+# The gate below needs a reader's name, so a command that cannot spell one is cleared before any grep.
+norm_may_re SG_MAY_READER cat head tail less more grep
+norm_may_hold "$CMD" "$SG_MAY_READER" || exit 0
+# Normalized like the mask guard's predicates, or a quoted reader name (`"cat" secrets.pem`) splits into its own segment with no trailing space and matches nothing.
+GATE_CMD=$(normalize_cmd "$CMD")
+# A leading slash admits the same reader named by path, and grep carries no recursive-flag condition: -r decides how many files are read, never whether the one named is a key — see README § Why grep is gated unconditionally.
+printf '%s' "$GATE_CMD" | grep -qE "(^|[[:space:]/$SEP])(cat|head|tail|less|more|grep)([[:space:]<$SEP]|\$)" \
+  || exit 0
+
+
 # Input bytes must not impersonate the tokenizer metadata that narrows scanning.
 case "$CMD" in
   *[$'\001\002\003\004\005']*) ask "READ-SECRET GUARD: command contains reserved tokenizer control bytes and cannot be inspected safely." "ask:inspection" ;;
 esac
-# Where the decoder joins an ASCII byte to a character (Shift-JIS, GBK, Big5, macOS EUC), the shell takes a \, | or ` after a non-ASCII byte into it and splits a word the C scan below does not — see README § Inherited options and locales.
-if [ -n "${SG_ASCII_TRAIL:-}" ]; then
-  case $CMD in
-    *[$'\200'-$'\377'][\\\|\`]*) ask "READ-SECRET GUARD: under this locale the shell reads a \\, | or \` right after a non-ASCII character as part of that character, so it splits this command into different words than this guard sees, and a secret file it reads could go unflagged. Confirm before its contents enter context/transcript." "ask:inspection" ;;
-  esac
-fi
 
 # What the prompt can honestly say about a pattern that is never expanded for the verdict — an absolute glob has no cwd dependence, so naming its matches is reproducible where naming a relative one's would not be; see README § What an unresolved glob prompt says.
 describe_glob() {
@@ -468,6 +470,8 @@ expand_braces() {  # expand_braces <word>; fills BRACE_ALTS
         if [ "$a" -lt "$b" ]; then a=$((a + 1)); else a=$((a - 1)); fi
       done
     else
+      # Unpaired braces bash still expands (`{a},.env}` gives `a}` and `.env`) go to the stem check below, unless the word has a query or regex shape, as on the literal path.
+      [[ $t == *\{*,*\}* ]] && [[ ! $t =~ $RE_QUERY_EXPR && ! $t =~ $RE_NOT_PATH ]] && return 1
       BRACE_ALTS+=("$t")
     fi
     [ $(( ${#pending[@]} - i + ${#BRACE_ALTS[@]} )) -le 64 ] || return 1

@@ -157,12 +157,14 @@ line that depends on it:
   macOS's EUC decoders, the shell that runs the command can take an ASCII
   byte after a non-ASCII one as part of that character: `cat —\ .env` reads
   `.env` under Shift-JIS and `cat 日\ .env` does under macOS eucJP, while in
-  UTF-8 and C the backslash escapes the space and the word is `— .env`. So
-  where the locale's decoder joins an ASCII byte to a character (the preamble
-  tests the locale itself, not its name), the reader gate asks about a
-  command that names a reader and has a `\`, `|` or `` ` `` directly after a
-  non-ASCII byte, since it cannot tell which words the shell will see.
-  glibc's EUC decoders join none, so the ask does not fire there.
+  UTF-8 and C the backslash escapes the space and the word is `— .env`. The
+  joined byte can be a quote, a `;`, a brace or a space too: under macOS
+  eucJP, `echo 日'; cat .env; #'` runs `cat .env`, because the quote that
+  would make the rest text belongs to the character. So where the locale's
+  decoder joins an ASCII byte to a character (the preamble tests the locale
+  itself, not its name), any Bash command holding a non-ASCII byte asks,
+  since no check here can tell how the shell will parse it. glibc's EUC
+  decoders join none, so this does not fire there.
 
 ## Fetches inside an invoked script
 

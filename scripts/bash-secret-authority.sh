@@ -3,7 +3,7 @@
 
 # First, and in ASCII: an option or locale inherited from the environment changes how every line below runs - see README § Inherited options and locales.
 set +o keyword +o noclobber
-_sg_mb=$'\xe2\x80\x94'; [ ${#_sg_mb} -eq 1 ] || { printf -v _sg_mb '\\x%x' {128..255}; printf -v _sg_mb '%b' "$_sg_mb"; [ ${#_sg_mb} -eq 128 ]; } || { _sg_mb=$'\xe4\x5c'; [ ${#_sg_mb} -ne 1 ] || SG_ASCII_TRAIL=1; LC_ALL=C; export LC_ALL SG_ASCII_TRAIL; }
+[ "${LC_ALL:-}" = C ] || unset SG_ASCII_TRAIL; _sg_mb=$'\xe2\x80\x94'; [ ${#_sg_mb} -eq 1 ] || { printf -v _sg_mb '\\x%x' {128..255}; printf -v _sg_mb '%b' "$_sg_mb"; [ ${#_sg_mb} -eq 128 ]; } || { _sg_mb=$'\xe4\x5c'; [ ${#_sg_mb} -ne 1 ] || SG_ASCII_TRAIL=1; LC_ALL=C; export LC_ALL SG_ASCII_TRAIL; }
 
 # Every verdict below is a grep, and a grep that cannot run matches nothing, which reads as safe - see README § Failing closed.
 command -v grep >/dev/null 2>&1 || { echo "SECRET GUARD: grep is not on PATH. Blocking: the guard cannot confirm this command is safe." >&2; exit 2; }
