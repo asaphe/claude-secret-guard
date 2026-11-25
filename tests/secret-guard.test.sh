@@ -498,8 +498,9 @@ else
 fi
 # With LC_ALL and LANG empty a forked stage's locale restore crashes bash 5, too rarely to catch by running; safe: C in a subshell or exported in $(…), a named-locale restore.
 locale_unsafe() {
-  # The preamble sets C once and never restores it; the preamble check below holds every copy to the authority's.
-  awk '/^[[:space:]]*#/ || /^_sg_mb=/ { prev = $0; next }
+  # The preamble's locale line sets C once and never restores it, so only that exact line is admitted.
+  SG_PREAMBLE_LOCALE=$(sed -n 6p "$PLUGIN_ROOT/scripts/bash-secret-authority.sh") awk 'BEGIN { pre = ENVIRON["SG_PREAMBLE_LOCALE"] }
+    /^[[:space:]]*#/ || $0 == pre { prev = $0; next }
     {
       l = $0
       gsub(/\([[:space:]]*(export )?LC_ALL=C;/, "(", l)
@@ -512,9 +513,9 @@ locale_unsafe() {
 # shellcheck disable=SC2016  # a sample script for the lint, never expanded
 printf '%s\n' '  x || LC_ALL=C tr a b <f' '  local LC_ALL=C' '  unset LC_ALL' '  local x LC_ALL' '  printf a | LC_ALL=C read v' \
   '  printf a | LC_ALL=C some_function' '  ( LC_ALL=C; y ); LANG=C z' '  printf -v LC_ALL %s C' '  read -r LANG <f' '  y=$(printf a | LC_ALL=C tr a b)' '  ( LC_ALL=C; [[ a =~ b ]] )' \
-  '  (export LC_ALL=C; tr -d x) <f' '  case ${LC_ALL:-C} in C) ;; esac' "$(sed -n 6p "$PLUGIN_ROOT/scripts/bash-secret-authority.sh")" >"$WORK/locale-unsafe.sh"
+  '  (export LC_ALL=C; tr -d x) <f' '  case ${LC_ALL:-C} in C) ;; esac' "$(sed -n 6p "$PLUGIN_ROOT/scripts/bash-secret-authority.sh")" '_sg_mb=x; LC_ALL=C' >"$WORK/locale-unsafe.sh"
 flagged=$(locale_unsafe "$WORK/locale-unsafe.sh" | sed 's/.*://' | tr '\n' ' ')
-if [ "$flagged" = "1 2 3 4 5 6 7 8 9 10 " ]; then ok; else bad "control: the locale lint flags lines '$flagged' of the sample, not exactly its unsafe lines 1-10"; fi
+if [ "$flagged" = "1 2 3 4 5 6 7 8 9 10 15 " ]; then ok; else bad "control: the locale lint flags lines '$flagged' of the sample, not exactly its unsafe lines 1-10 and 15"; fi
 unsafe=$(locale_unsafe "$PLUGIN_ROOT"/scripts/*.sh)
 if [ -z "$unsafe" ]; then ok; else bad "a locale assignment a forked stage would restore: $unsafe"; fi
 # With no locale the brace file's tr runs by exec, a fork fewer on bash 3.2; only a missing tr shows it, in an error that names exec.
@@ -594,7 +595,7 @@ check_hooks() {  # check_hooks <label> <prefix> [env argument...]
   done
   run_hook bash-secret-authority.sh "$(bash_payload "${pre}echo $FRESH > /tmp/fixture-probe")" "$@"
   assert_exit "$label: writing a key from Bash blocks" 2 $?
-  run_hook bash-secret-authority.sh "$(bash_payload "${pre}ls -la /tmp")" "$@"
+  run_hook bash-secret-authority.sh "$(bash_payload "ls -la /tmp")" "$@"
   quiet "$label: a plain command passes" $?
   run_hook read-secret-guard.sh "$(jq -nc --arg p "/a/$DASH/.kube/config" '{tool_name:"Read", tool_input:{file_path:$p}}')" "$@"
   asked "$label: the Read hook asks for a kubeconfig" $?
@@ -625,7 +626,7 @@ if locale -a 2>/dev/null | grep -x 'ja_JP.SJIS' >/dev/null; then
   # The shell itself joins a \ after a non-ASCII byte to that character, so `—\ .env` names .env there and one word with a space in UTF-8.
   run_hook bash-secret-authority.sh "$(bash_payload "cat $DASH\\ .env")" LC_ALL=ja_JP.SJIS
   asked "under Shift-JIS a backslash after a non-ASCII character asks" $?
-  if grep -qF 'under this locale the shell reads' "$OUT"; then ok; else bad "under Shift-JIS the backslash ask lost its reason: $(head -c 160 "$OUT")"; fi
+  if grep -qF 'under this locale the shell can read' "$OUT"; then ok; else bad "under Shift-JIS the backslash ask lost its reason: $(head -c 160 "$OUT")"; fi
   run_hook bash-secret-authority.sh "$(bash_payload "cat $DASH| tr a b")" LC_ALL=ja_JP.SJIS
   asked "under Shift-JIS a pipe after a non-ASCII character asks" $?
 else
@@ -644,6 +645,23 @@ for loc in ja_JP.SJIS zh_CN.GBK zh_TW.Big5 zh_CN.GB18030 ja_JP.eucJP ko_KR.eucKR
   if [ "$split" -eq 1 ]; then asked "under $loc, where bash splits a backslash off a character, the reader asks" $rc
   elif [ "$loc" = en_US.UTF-8 ]; then quiet "control: under $loc bash keeps the escape and the reader passes" $rc; fi
 done
+# Wherever bash joins the quote after 日 and runs what the guard reads as quoted text, that command must not pass silently.
+printf '%s\n' "printf '[%s]' "$'\xe6\x97\xa5'"'; echo R\"\"AN; #'" >"$WORK/joined-quote.sh"
+# Built outside $(…): bash 3.2 misparses a $'…' beside braces inside a double-quoted substitution.
+JOINED_QUOTE=$(bash_payload "echo "$'\xe6\x97\xa5'"'; cat .env; #'")
+JOINED_BRACE=$(bash_payload "cat {.env,a$DASH}x}")
+for loc in ja_JP.SJIS zh_CN.GBK zh_TW.Big5 zh_CN.GB18030 ja_JP.eucJP ko_KR.eucKR en_US.UTF-8; do
+  locale -a 2>/dev/null | grep -x "$loc" >/dev/null || continue
+  ran=$(LC_ALL=$loc bash "$WORK/joined-quote.sh" 2>/dev/null | grep -c RAN)
+  run_hook bash-secret-authority.sh "$JOINED_QUOTE" LC_ALL=$loc
+  rc=$?
+  if [ "$ran" -eq 1 ]; then asked "under $loc, where bash joins the quote and runs the rest, the command asks" $rc
+  elif [ "$loc" = en_US.UTF-8 ]; then quiet "control: under $loc the quote opens and the rest is text" $rc; fi
+done
+if locale -a 2>/dev/null | grep -x 'ja_JP.SJIS' >/dev/null; then
+  run_hook bash-secret-authority.sh "$JOINED_BRACE" LC_ALL=ja_JP.SJIS
+  asked "under Shift-JIS a close brace joined to a character asks" $?
+fi
 if locale -a 2>/dev/null | grep -x 'ja_JP.eucJP' >/dev/null; then
   # The reader's own `…` once took its closing quote under EUC, so every reader command asked that the inspection stopped partway.
   run_hook bash-secret-authority.sh "$(bash_payload 'cat notes.txt')" LC_ALL=ja_JP.eucJP
