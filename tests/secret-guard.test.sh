@@ -313,6 +313,330 @@ printf '' | "$COPY/scripts/op-cache-cleanup.sh" >"$OUT" 2>"$ERR"
 assert_exit "the Stop hook does not block on an empty payload" 0 $?
 assert_err_has "the Stop hook says the caches were left behind" "may persist"
 
+# The authority's one-jq parse takes only the plain-string shape; anything else must reach each stage's own parse, message included.
+printf '' | "$COPY/scripts/bash-secret-authority.sh" >"$OUT" 2>"$ERR"
+assert_exit "the authority blocks an empty payload" 2 $?
+assert_err_has "the authority's empty-payload block is the first stage's own" "SECRET-MASK GUARD: cannot read the hook payload — it is empty"
+printf '%s' '{"tool_input":"x","session_id":"s"}' | "$COPY/scripts/bash-secret-authority.sh" >"$OUT" 2>"$ERR"
+assert_exit "the authority blocks a payload whose tool_input is not an object" 2 $?
+assert_err_has "that block comes from the stage's own field parse" "SECRET-MASK GUARD: cannot read the hook payload — jq is missing or the JSON did not parse"
+for shape in '{"tool_input":{"command":["cat","/a/.env"]}}' '{"tool_input":{"command":"cat /a/.env"},"session_id":{"a":1}}'; do
+  printf '%s' "$shape" | "$COPY/scripts/bash-secret-authority.sh" >"$OUT" 2>"$ERR"; got=$?
+  printf '%s' "$shape" | "$COPY/scripts/read-secret-guard-bash.sh" >"$WORK/stage.out" 2>/dev/null; want=$?
+  assert_exit "the authority exits as the stage does on $shape" "$want" "$got"
+  if cmp -s "$OUT" "$WORK/stage.out"; then ok; else bad "the authority's output on $shape differs from the stage's own"; fi
+done
+# A stage's own $(jq -r …) trims trailing newlines, and the ask log records the command it saw.
+NL_SHAPE='{"tool_input":{"command":"cat /a/.env\n\n"},"session_id":"s"}'
+printf '%s' "$NL_SHAPE" | HOOK_DIAG_ASK_LOG="$WORK/nl-auth.log" "$COPY/scripts/bash-secret-authority.sh" >/dev/null 2>&1
+printf '%s' "$NL_SHAPE" | HOOK_DIAG_ASK_LOG="$WORK/nl-stage.log" "$COPY/scripts/read-secret-guard-bash.sh" >/dev/null 2>&1
+if [ -s "$WORK/nl-stage.log" ] && [ "$(grep '^cmd=' "$WORK/nl-auth.log")" = "$(grep '^cmd=' "$WORK/nl-stage.log")" ]; then ok
+else bad "the authority hands the stages a command with trailing newlines their own parse would have trimmed"; fi
+
+# A stage's own $(jq -r …) gets a real NUL for \u0000 and bash drops it, so each of these always read as the bare command.
+for nul in 'op rea\u0000d op://v/i/f' 'aws secretsmanager get-secret-val\u0000ue --secret-id x' 'op item get x --rev\u0000eal'; do
+  printf '{"tool_input":{"command":"%s"},"session_id":"%s"}' "$nul" "$SESSION_ID" | "$COPY/scripts/bash-secret-authority.sh" >"$OUT" 2>"$ERR"
+  assert_exit "a \\u0000 inside '$nul' still blocks" 2 $?
+  assert_err_has "the \\u0000 block for '$nul' is the mask guard's own" "SECRET-MASK GUARD: "
+done
+printf '{"tool_input":{"command":"c\\u0000at /a/.env"},"session_id":"%s"}' "$SESSION_ID" | "$COPY/scripts/bash-secret-authority.sh" >"$OUT" 2>"$ERR"
+assert_exit "a \\u0000 inside a reader name still exits 0" 0 $?
+if grep -qF '"ask"' "$OUT"; then ok; else bad "a \\u0000 inside a reader name no longer asks"; fi
+mkdir -p "$WORK/nulcwd"
+printf 'op read op://v/i/f\n' >"$WORK/nulcwd/fetch.sh"
+printf '{"tool_input":{"command":"bash ./fetch.sh"},"session_id":"%s","cwd":"%s\\u0000cwd"}' "$SESSION_ID" "$WORK/nul" | "$COPY/scripts/bash-secret-authority.sh" >"$OUT" 2>"$ERR"
+assert_exit "a \\u0000 inside cwd still resolves the invoked script" 2 $?
+assert_err_has "the cwd block names the script it scanned" "fetch.sh performs a raw secret read"
+
+# Each stage parses every JSON value on stdin and acts on all of them, so a second value can never hide the first.
+printf '{"tool_input":{"command":"op read op://v/i/f"},"session_id":"%s"} {"tool_input":{"command":"ls"},"session_id":"%s"}' "$SESSION_ID" "$SESSION_ID" \
+  | "$COPY/scripts/bash-secret-authority.sh" >"$OUT" 2>"$ERR"
+assert_exit "a second JSON value does not hide a raw op read in the first" 2 $?
+printf '{"tool_input":{"command":"ls"},"session_id":"%s"} {"tool_input":{"command":"op read op://v/i/f"},"session_id":"%s"}' "$SESSION_ID" "$SESSION_ID" \
+  | "$COPY/scripts/bash-secret-authority.sh" >"$OUT" 2>"$ERR"
+assert_exit "a first JSON value does not hide a raw op read in the second" 2 $?
+printf '{"tool_input":{"command":"ls"},"session_id":"%s"} 5' "$SESSION_ID" | "$COPY/scripts/bash-secret-authority.sh" >"$OUT" 2>"$ERR"
+assert_exit "a non-object second value is refused as before" 2 $?
+assert_err_has "that refusal is the first stage's own" "SECRET-MASK GUARD: cannot read the hook payload — it is empty, not a JSON object"
+
+# $(cat) drops every NUL byte, so stdin reads as the bytes around them.
+printf '\0{"tool_input":{"command":"ls"},"session_id":"%s"}' "$SESSION_ID" | "$COPY/scripts/bash-secret-authority.sh" >"$OUT" 2>"$ERR"
+assert_exit "a NUL byte before the payload is dropped, not read as its end" 0 $?
+printf '{"tool_input":{"command":"ls"},"session_id":"%s"}\0junk' "$SESSION_ID" | "$COPY/scripts/bash-secret-authority.sh" >"$OUT" 2>"$ERR"
+assert_exit "bytes after a NUL are still part of the payload" 2 $?
+# The PostToolUse guard's own $(cat) printed bash's null-byte warning wherever the running bash prints one.
+NUL_WARN=$(bash -c 'x=$(printf "a\0b")' 2>&1 | grep -c 'ignored null byte')
+printf '{"tool_input":{"command":"ls"},"session_id":"%s","hook_event_name":"PostToolUse"}\0' "$SESSION_ID" | "$COPY/scripts/op-read-guard.sh" >"$OUT" 2>"$ERR"
+assert_exit "a NUL byte on the PostToolUse guard's stdin is dropped" 0 $?
+if [ "$(grep -c 'ignored null byte' "$ERR")" = "$NUL_WARN" ]; then ok; else bad "the PostToolUse guard's null-byte warning count differs from this bash's own ($NUL_WARN)"; fi
+
+# Run as its own pipeline, the duplicate-read stage without a session id was named after a parent that is new on every call.
+F5_ITEM="f5probe$$"
+for n in 1 2; do
+  printf '{"tool_input":{"command":"op item get %s --fields password"}}' "$F5_ITEM" | env -u CLAUDE_CODE_SESSION_ID "$COPY/scripts/bash-secret-authority.sh" >"$OUT" 2>"$ERR"
+  assert_exit "call $n of an item get without a session id is not a duplicate" 0 $?
+done
+grep -lF "$F5_ITEM" /tmp/claude-op-reads-uid"$(id -u)"-pid* 2>/dev/null | while IFS= read -r f; do rm -f "$f"; done
+
+# A parse the environment claims happened, when nothing parsed this payload, would hand every stage an empty command.
+printf '{"tool_input":{"command":"op read op://v/i/f"},"session_id":"%s"}' "$SESSION_ID" \
+  | SGA_PREPARSED=1 SG_NC_PRIMED=1 SG_NC_IN='op read op://v/i/f' SG_NC_OUT=ls "$COPY/scripts/bash-secret-authority.sh" >"$OUT" 2>"$ERR"
+assert_exit "an inherited parse flag does not disarm the authority" 2 $?
+printf '' | SGA_PREPARSED=1 "$COPY/scripts/op-read-guard.sh" >"$OUT" 2>"$ERR"
+assert_exit "an inherited parse flag does not disarm the PostToolUse guard" 2 $?
+# Without a session id each stage runs as its own bash, which inherits whatever the authority did not clear.
+printf '{"tool_input":{"command":"op read op://v/i/f"}}' | env -u CLAUDE_CODE_SESSION_ID SGA_PREPARSED=1 "$COPY/scripts/bash-secret-authority.sh" >"$OUT" 2>"$ERR"
+assert_exit "an inherited parse flag does not disarm the stages run as their own bash" 2 $?
+
+# Inherited shell options act on every line that changed, so under errexit the stages' own parse must still decide.
+printf '{"tool_input":{"command":"cat /a/.env"}}' | env -u CLAUDE_CODE_SESSION_ID SHELLOPTS=errexit "$COPY/scripts/bash-secret-authority.sh" >"$OUT" 2>"$ERR"
+assert_exit "under errexit a reader still exits 0" 0 $?
+if grep -qF '"ask"' "$OUT"; then ok; else bad "under errexit a reader no longer asks"; fi
+printf '{"tool_input":{"command":"op item get %s --fields password"},"hook_event_name":"PostToolUse"}' "$F5_ITEM" \
+  | env -u CLAUDE_CODE_SESSION_ID SHELLOPTS=errexit "$COPY/scripts/op-read-guard.sh" >"$OUT" 2>"$ERR"
+assert_exit "under errexit the PostToolUse guard still records a read" 0 $?
+grep -lF "$F5_ITEM" /tmp/claude-op-reads-uid"$(id -u)"-pid* 2>/dev/null | while IFS= read -r f; do rm -f "$f"; done
+# Stripping trailing newlines one at a time copies the text each time; this many outran the 30 s hook timeout, which lets the command run unchecked.
+MANY_NL=$(printf 'op read op://v/i/f'; printf '\n%.0s' {1..60000}; printf x); MANY_NL=${MANY_NL%x}
+jq -n --arg c "$MANY_NL" --arg s "$SESSION_ID" '{session_id:$s, tool_input:{command:$c}}' >"$WORK/many-nl.json"
+SECONDS=0
+"$COPY/scripts/bash-secret-authority.sh" <"$WORK/many-nl.json" >"$OUT" 2>"$ERR"
+assert_exit "a raw op read followed by 60,000 newlines blocks" 2 $?
+if [ "$SECONDS" -le 10 ]; then ok; else bad "a command followed by 60,000 newlines took ${SECONDS}s"; fi
+{ cat "$WORK/many-nl.json"; printf '\n%.0s' {1..40000}; } >"$WORK/many-nl-stdin.json"
+SECONDS=0
+"$COPY/scripts/bash-secret-authority.sh" <"$WORK/many-nl-stdin.json" >"$OUT" 2>"$ERR"
+assert_exit "a payload followed by 40,000 newlines on stdin blocks the same command" 2 $?
+if [ "$SECONDS" -le 10 ]; then ok; else bad "a payload followed by 40,000 newlines on stdin took ${SECONDS}s"; fi
+
+# A cwd starting with a dash reaches dirname, whose complaint about it has always been part of the output.
+mkdir -p "$WORK/dashcwd/-sgd"
+printf 'echo hi\n' >"$WORK/dashcwd/-sgd/s.sh"
+(cd "$WORK/dashcwd" && printf '{"tool_input":{"command":"bash ./s.sh"},"session_id":"%s","cwd":"-sgd"}' "$SESSION_ID" | "$COPY/scripts/bash-secret-authority.sh") >"$OUT" 2>"$ERR"
+assert_exit "a dash-leading cwd with a benign script passes" 0 $?
+# Matched against this dirname's own complaint: GNU, BSD and uutils word it differently.
+DASH_ERR=$(dirname -sgd/s.sh 2>&1 >/dev/null | head -n 1)
+if [ -n "$DASH_ERR" ]; then
+  assert_err_has "a dash-leading script path still goes through dirname" "$DASH_ERR"
+else
+  echo "skipped: this dirname accepts a dash-leading path without an error, so stderr cannot show it ran"
+fi
+
+# Bash 3.2 itself: posix mode cannot parse the mask guard's `< <(…)`, and a Shift-JIS backslash can be a character's second byte.
+if [ -x /bin/bash ] && [ "$(/bin/bash -c 'echo "${BASH_VERSINFO[0]}"')" -lt 5 ]; then
+  mkdir -p "$WORK/bash32"; ln -sf /bin/bash "$WORK/bash32/bash"
+  printf '{"tool_input":{"command":"op read op://v/i/f"},"session_id":"%s"}' "$SESSION_ID" \
+    | PATH="$WORK/bash32:$PATH" POSIXLY_CORRECT=1 /bin/bash "$COPY/scripts/bash-secret-authority.sh" >"$OUT" 2>"$ERR"
+  assert_exit "in posix mode a raw op read still blocks" 2 $?
+  assert_err_has "in posix mode the block is the mask guard's own" "SECRET-MASK GUARD: raw 'op read'"
+  printf '{"tool_input":{"command":"ls"},"session_id":"%s"}' "$SESSION_ID" \
+    | PATH="$WORK/bash32:$PATH" POSIXLY_CORRECT=1 /bin/bash "$COPY/scripts/bash-secret-authority.sh" >"$OUT" 2>"$ERR"
+  assert_exit "in posix mode a stage bash cannot parse still blocks" 2 $?
+  # Not grep -q: under pipefail its early exit fails the pipeline and reads as a missing locale.
+  if locale -a 2>/dev/null | grep -x 'ja_JP.SJIS' >/dev/null; then
+    jq -n --arg c "$(printf 'echo pad\\x %s\n\304\201\\\nop read op://v/i/f' "$(printf 'y%.0s' {1..600})")" --arg s "$SESSION_ID" \
+      '{session_id:$s, tool_input:{command:$c}}' >"$WORK/sjis.json"
+    PATH="$WORK/bash32:$PATH" LC_ALL=ja_JP.SJIS /bin/bash "$COPY/scripts/bash-secret-authority.sh" <"$WORK/sjis.json" >"$OUT" 2>"$ERR"
+    assert_exit "in Shift-JIS a backslash that ends a character does not join the next line" 2 $?
+  else
+    echo "skipped: the Shift-JIS case needs the ja_JP.SJIS locale"
+  fi
+else
+  echo "skipped: the posix-mode and Shift-JIS cases need a /bin/bash before 5"
+fi
+
+# Every stage was its own bash, so each read BASH_ENV: the authority once and the four stages once each.
+printf 'printf x >>"%s"\n' "$WORK/bashenv.log" >"$WORK/bashenv.sh"
+printf '{"tool_input":{"command":"ls"},"session_id":"%s"}' "$SESSION_ID" | BASH_ENV="$WORK/bashenv.sh" "$COPY/scripts/bash-secret-authority.sh" >"$OUT" 2>"$ERR"
+assert_exit "a plain command passes with BASH_ENV set" 0 $?
+if [ "$(cat "$WORK/bashenv.log")" = "xxxxx" ]; then ok; else bad "BASH_ENV was read $(wc -c <"$WORK/bashenv.log" | tr -d ' ') times, not once by the authority and once per stage"; fi
+# A missing stage file was bash's own 127, and a missing payload helper must not cost the stages their payload.
+STAGE_GONE=$(plugin_copy stage-gone)
+rm "$STAGE_GONE/scripts/write-secret-guard-bash.sh"
+printf '{"tool_input":{"command":"ls"},"session_id":"%s"}' "$SESSION_ID" | "$STAGE_GONE/scripts/bash-secret-authority.sh" >"$OUT" 2>"$ERR"
+assert_exit "a missing stage file exits as bash does" 127 $?
+HELPER_GONE=$(plugin_copy helper-gone)
+rm "$HELPER_GONE/scripts/hook-payload.sh"
+printf '{"tool_input":{"command":"ls"},"session_id":"%s"}' "$SESSION_ID" | "$HELPER_GONE/scripts/bash-secret-authority.sh" >"$OUT" 2>"$ERR"
+assert_exit "without hook-payload.sh a plain command still passes" 0 $?
+printf '{"tool_input":{"command":"op read op://v/i/f"},"session_id":"%s"}' "$SESSION_ID" | "$HELPER_GONE/scripts/bash-secret-authority.sh" >"$OUT" 2>"$ERR"
+assert_exit "without hook-payload.sh a raw op read still blocks" 2 $?
+# In posix mode a . that cannot open its file exits the shell before any stage runs.
+printf '{"tool_input":{"command":"op read op://v/i/f"},"session_id":"%s"}' "$SESSION_ID" | POSIXLY_CORRECT=1 "$HELPER_GONE/scripts/bash-secret-authority.sh" >"$OUT" 2>"$ERR"
+assert_exit "in posix mode without hook-payload.sh a raw op read still blocks" 2 $?
+printf '{"tool_input":{"command":"op read op://v/i/f"},"hook_event_name":"PostToolUse","session_id":"%s"}' "$SESSION_ID" | POSIXLY_CORRECT=1 "$HELPER_GONE/scripts/op-read-guard.sh" >"$OUT" 2>"$ERR"
+assert_exit "in posix mode without hook-payload.sh the PostToolUse guard still exits 0" 0 $?
+# A sourced stage runs one function level deeper, inside sg_stage.
+printf '{"tool_input":{"command":"op read op://v/i/f"},"session_id":"%s"}' "$SESSION_ID" | FUNCNEST=1 "$COPY/scripts/bash-secret-authority.sh" >"$OUT" 2>"$ERR"
+assert_exit "under FUNCNEST=1 a raw op read still blocks" 2 $?
+printf '{"tool_input":{"command":"cat /a/.env"},"session_id":"%s"}' "$SESSION_ID" | FUNCNEST=2 "$COPY/scripts/bash-secret-authority.sh" >"$OUT" 2>"$ERR"
+assert_exit "under FUNCNEST=2 a reader still exits 0" 0 $?
+if grep -qF '"ask"' "$OUT"; then ok; else bad "under FUNCNEST=2 a reader no longer asks"; fi
+# The read builtin honors an inherited TMOUT, which $(cat) never did.
+{ printf '{"tool_input":{"command":'; sleep 2; printf '"ls"},"session_id":"%s"}' "$SESSION_ID"; } | TMOUT=1 "$COPY/scripts/bash-secret-authority.sh" >"$OUT" 2>"$ERR"
+assert_exit "a payload paused longer than an inherited TMOUT is still read whole" 0 $?
+# Under nocasematch the memo would hand a script body equal to the command up to case the command's normalization.
+mkdir -p "$WORK/nocase/sub"
+printf 'SH SUB/S.SH # op read\n' >"$WORK/nocase/sub/s.sh"
+(cd "$WORK/nocase" && printf '{"tool_input":{"command":"sh sub/s.sh # OP READ"},"session_id":"%s","cwd":"%s"}' "$SESSION_ID" "$WORK/nocase" | env BASHOPTS=nocasematch "$COPY/scripts/bash-secret-authority.sh") >"$OUT" 2>"$ERR"
+assert_exit "under nocasematch a script that runs op read still blocks" 2 $?
+# Under an invalid locale every restore of LC_ALL warns from the script's own line, which 0.6.15 never did here; bash 3.2 never warns, so a control restore must warn first.
+mkdir -p "$WORK/locale-ctl/scripts"
+printf 'f() { local LC_ALL=C; :; }\nf\n' >"$WORK/locale-ctl/scripts/restore.sh"
+if LC_ALL=xx_YY.UTF-8 bash "$WORK/locale-ctl/scripts/restore.sh" 2>&1 | grep -E 'scripts/[^ ]*\.sh: line [0-9]+: warning: setlocale' >/dev/null; then
+  for cmd in 'ls -la /tmp' 'op read op://v/i/f'; do
+    printf '{"tool_input":{"command":"%s"},"session_id":"%s"}' "$cmd" "$SESSION_ID" | LC_ALL=xx_YY.UTF-8 "$COPY/scripts/bash-secret-authority.sh" >"$OUT" 2>"$ERR"
+    if grep -qE 'scripts/[^ ]*\.sh: line [0-9]+: warning: setlocale' "$ERR"; then bad "under an invalid LC_ALL a stage restored the locale on '$cmd': $(grep -m1 -E 'scripts/[^ ]*\.sh: line [0-9]+: warning: setlocale' "$ERR")"; else ok; fi
+  done
+  # Under lastpipe a pipeline's last command runs in the shell, which restores a LC_ALL=C on it; env, as BASHOPTS is readonly here and a prefix assignment fails.
+  for cmd in 'echo a\necho b' 'ls -la /tmp' 'cat /a/.env'; do
+    printf '{"tool_input":{"command":"%s"},"session_id":"%s"}' "$cmd" "$SESSION_ID" | env BASHOPTS=lastpipe LC_ALL=xx_YY.UTF-8 "$COPY/scripts/bash-secret-authority.sh" >"$OUT" 2>"$ERR"
+    if grep -qE 'scripts/[^ ]*\.sh: line [0-9]+: warning: setlocale' "$ERR"; then bad "under lastpipe and an invalid LC_ALL a stage restored the locale on '$cmd': $(grep -m1 -E 'scripts/[^ ]*\.sh: line [0-9]+: warning: setlocale' "$ERR")"; else ok; fi
+  done
+else
+  echo "skipped: the invalid-locale cases need a bash on PATH that warns when it restores an invalid locale (bash 5)"
+fi
+# With LC_ALL and LANG empty a forked stage's locale restore crashes bash 5, too rarely to catch by running; safe: C in a subshell or exported in $(…), a named-locale restore.
+locale_unsafe() {
+  awk '/^[[:space:]]*#/ { prev = $0; next }
+    {
+      l = $0
+      gsub(/\([[:space:]]*(export )?LC_ALL=C;/, "(", l)
+      gsub(/\|\|/, "OR", l)
+      if (l ~ /(^|[^A-Za-z_])(local|declare|typeset|unset|read|printf[[:space:]]+-v)[[:space:]][^;&|]*(LC_[A-Z]+|LANG)([^A-Za-z_]|$)/ ||
+          (l ~ /(^|[^A-Za-z_])(LC_[A-Z]+|LANG)\+?=/ && prev !~ /\[ -n "\$\{LC_ALL:-\}\$\{LANG:-\}" \]/)) print FILENAME ":" FNR
+      prev = $0
+    }' "$@"
+}
+# shellcheck disable=SC2016  # a sample script for the lint, never expanded
+printf '%s\n' '  x || LC_ALL=C tr a b <f' '  local LC_ALL=C' '  unset LC_ALL' '  local x LC_ALL' '  printf a | LC_ALL=C read v' \
+  '  printf a | LC_ALL=C some_function' '  ( LC_ALL=C; y ); LANG=C z' '  printf -v LC_ALL %s C' '  read -r LANG <f' '  y=$(printf a | LC_ALL=C tr a b)' '  ( LC_ALL=C; [[ a =~ b ]] )' \
+  '  (export LC_ALL=C; tr -d x) <f' '  case ${LC_ALL:-C} in C) ;; esac' >"$WORK/locale-unsafe.sh"
+flagged=$(locale_unsafe "$WORK/locale-unsafe.sh" | sed 's/.*://' | tr '\n' ' ')
+if [ "$flagged" = "1 2 3 4 5 6 7 8 9 10 " ]; then ok; else bad "control: the locale lint flags lines '$flagged' of the sample, not exactly its unsafe lines 1-10"; fi
+unsafe=$(locale_unsafe "$PLUGIN_ROOT"/scripts/*.sh)
+if [ -z "$unsafe" ]; then ok; else bad "a locale assignment a forked stage would restore: $unsafe"; fi
+# With no locale the brace file's tr runs by exec, a fork fewer on bash 3.2; only a missing tr shows it, in an error that names exec.
+mkdir -p "$WORK/notr"
+for tool in bash jq mktemp grep sed cat rm head awk perl dirname wc; do ln -s "$(command -v "$tool")" "$WORK/notr/$tool"; done
+printf '{"tool_input":{"command":"cat /a/{x,b}"},"session_id":"%s"}' "$SESSION_ID" | env -u LC_ALL -u LANG PATH="$WORK/notr" "$COPY/scripts/bash-secret-authority.sh" >"$OUT" 2>"$ERR"
+assert_err_has "with no locale and no tr, the brace file's tr was run by exec" "exec: tr: not found"
+# macOS EUC decoders take a quote as a character's second byte, so an eval of jq's quoting emptied every stage's command and ran a cwd's $(…).
+EUC_CHAR=$'\xe6\x97\xa5'
+if locale -a 2>/dev/null | grep -x 'ja_JP.eucJP' >/dev/null; then
+  EUC_RUN=(env LC_ALL=ja_JP.eucJP CLAUDE_CODE_SESSION_ID="$SESSION_ID-euc")
+  jq -n --arg c "op read op://v/i/f # $EUC_CHAR" '{tool_input:{command:$c}}' | "${EUC_RUN[@]}" "$COPY/scripts/bash-secret-authority.sh" >"$OUT" 2>"$ERR"
+  assert_exit "under eucJP a raw op read ending in a CJK character still blocks" 2 $?
+  jq -n --arg c "cat /a/.env # $EUC_CHAR" '{tool_input:{command:$c}}' | "${EUC_RUN[@]}" "$COPY/scripts/bash-secret-authority.sh" >"$OUT" 2>"$ERR"
+  assert_exit "under eucJP a reader ending in a CJK character exits 0" 0 $?
+  if grep -qF '"ask"' "$OUT"; then ok; else bad "under eucJP a reader ending in a CJK character no longer asks"; fi
+  # A cwd alone breaks it, and sed in 0.6.15 rejects a command ending in a lone EUC lead byte, so these keep the command ASCII.
+  jq -n --arg w "/tmp/d$EUC_CHAR" '{tool_input:{command:"op read op://v/i/f"}, cwd:$w}' | "${EUC_RUN[@]}" "$COPY/scripts/bash-secret-authority.sh" >"$OUT" 2>"$ERR"
+  assert_exit "under eucJP a raw op read from a cwd ending in a CJK character still blocks" 2 $?
+  EUC_ITEM="eucprobe$$"
+  jq -n --arg c "op item get $EUC_ITEM --fields password" --arg w "/tmp/d$EUC_CHAR" '{tool_input:{command:$c}, hook_event_name:"PostToolUse", cwd:$w}' \
+    | "${EUC_RUN[@]}" "$COPY/scripts/op-read-guard.sh" >"$OUT" 2>"$ERR"
+  assert_exit "under eucJP the PostToolUse guard exits 0" 0 $?
+  if grep -lF "$EUC_ITEM" "/tmp/claude-op-reads-$SESSION_ID-euc"* >/dev/null 2>&1; then ok; else bad "under eucJP the PostToolUse guard did not record an item get from a cwd ending in a CJK character"; fi
+  mkdir -p "$WORK/euc"
+  for hook in bash-secret-authority.sh:PreToolUse op-read-guard.sh:PostToolUse; do
+    rm -f "$WORK/euc/ran"
+    jq -n --arg c "ls $EUC_CHAR" --arg w "$WORK/euc/\$(touch $WORK/euc/ran)$EUC_CHAR" --arg e "${hook#*:}" '{tool_input:{command:$c}, hook_event_name:$e, cwd:$w}' \
+      | "${EUC_RUN[@]}" "$COPY/scripts/${hook%%:*}" >"$OUT" 2>"$ERR"
+    if [ -e "$WORK/euc/ran" ]; then bad "under eucJP ${hook%%:*} ran text from the payload's cwd"; else ok; fi
+  done
+else
+  echo "skipped: the EUC cases need the ja_JP.eucJP locale"
+fi
+# The one-jq parse is for UTF-8 and one-character-per-byte locales; Big5 counts — as three yet joins high bytes, like glibc's EUC-TW, which takes a quote as a later byte.
+cat >"$WORK/parse.sh" <<'EOF'
+. "$1"; SGA_INPUT='{"tool_input":{"command":"ls"},"session_id":"s"}'; sg_parse_payload 2>/dev/null; echo $?
+EOF
+for spec in C:0 en_US.UTF-8:0 en_US.ISO8859-1:0 zh_TW.Big5:1 ja_JP.eucJP:1 ja_JP.SJIS:1; do
+  if locale -a 2>/dev/null | grep -x "${spec%:*}" >/dev/null; then
+    got=$(env -u LANG -u LC_CTYPE LC_ALL="${spec%:*}" "$BASH" "$WORK/parse.sh" "$PLUGIN_ROOT/scripts/hook-payload.sh")
+    if [ "$got" = "${spec##*:}" ]; then ok; else bad "under ${spec%:*} the one-jq parse returned '$got', not ${spec##*:}"; fi
+  else
+    echo "skipped: the parse-route case under ${spec%:*} needs a locale by that name"
+  fi
+done
+# With LC_ALL and LANG empty the brace file's tr must still read bytes, or a Shift-JIS lead byte at a word's end stops it with an error.
+if locale -a 2>/dev/null | grep -x 'ja_JP.SJIS' >/dev/null; then
+  jq -n --arg c $'cat \xc4\x81{a,b}\xc4\x81' --arg s "$SESSION_ID" '{session_id:$s, tool_input:{command:$c}}' \
+    | env -u LC_ALL -u LANG LC_CTYPE=ja_JP.SJIS "$COPY/scripts/bash-secret-authority.sh" >"$OUT" 2>"$ERR"
+  assert_exit "under LC_CTYPE=ja_JP.SJIS a brace word ending in a lead byte passes" 0 $?
+  assert_err_lacks "under LC_CTYPE=ja_JP.SJIS the brace file's tr reads bytes" "Illegal byte sequence"
+else
+  echo "skipped: the Shift-JIS brace-file case needs the ja_JP.SJIS locale"
+fi
+
+echo "=== Normalization memo and gates ==="
+# shellcheck source-path=SCRIPTDIR/../scripts
+. "$PLUGIN_ROOT/scripts/strip-cmd.sh"
+for text in $'op "read" x\n\n' 'o\p read' "\$'op' read" ''; do
+  fresh=$(normalize_cmd "$text"; printf x)
+  normalize_cmd_prime "$text"
+  primed=$(normalize_cmd "$text"; printf x)
+  if [ "$fresh" = "$primed" ]; then ok; else bad "a primed normalization of $(printf %q "$text") differs from a fresh one"; fi
+  other=$(normalize_cmd "$text \"y\""; printf x)
+  if [ "$other" = "$(SG_NC_PRIMED='' normalize_cmd "$text \"y\""; printf x)" ]; then ok; else bad "priming $(printf %q "$text") changed another text's normalization"; fi
+done
+unset SG_NC_PRIMED
+# Every respelling normalize_cmd undoes must still open the gate, or a predicate behind it goes blind to that spelling.
+GATE_OPEN=('op' 'o"p"' "o'p'" 'o\p' $'o\\\np' "o\$'p'" 'o$"p"' $'\xc3\xa9op' $'\xffop' $'op\xff' $'\x83op')
+GATE_SHUT=('o p' 'oxp' 'ls -la /tmp' $'\xc3\xa9xp' $'\xff oxp')
+for text in "${GATE_OPEN[@]}"; do
+  case "$(normalize_cmd "$text")" in *op*) ;; *) bad "control: $(printf %q "$text") does not normalize to op" ;; esac
+done
+GATE_WANT=$(printf '1%.0s' "${GATE_OPEN[@]}"; printf '0%.0s' "${GATE_SHUT[@]}")
+cat >"$WORK/gate.sh" <<'EOF'
+. "$1"; shift; norm_may_re G op
+c=$'\x83op'; [[ $c =~ $G ]] && printf 1 || printf 0
+for t in "$@"; do norm_may_hold "$t" "$G" && printf 1 || printf 0; done
+EOF
+# A bare =~ passes every case in C, so they are pinned where it fails; the first digit is 1 where =~ matches \x83op in place: C (bash 3.2's fallback for a missing locale) or glibc.
+for loc in none en_US.UTF-8 C.UTF-8 ja_JP.SJIS; do
+  if [ "$loc" = none ]; then run=(env -u LC_ALL -u LANG -u LC_CTYPE); else run=(env -u LANG -u LC_CTYPE "LC_ALL=$loc"); fi
+  got=$("${run[@]}" "$BASH" "$WORK/gate.sh" "$PLUGIN_ROOT/scripts/strip-cmd.sh" "${GATE_OPEN[@]}" "${GATE_SHUT[@]}" 2>/dev/null)
+  case $loc:$got in
+    none:?* | *:0*) if [ "${got#?}" = "$GATE_WANT" ]; then ok; else bad "under $loc the gate answers ${got#?} for $(printf '%q ' "${GATE_OPEN[@]}" "${GATE_SHUT[@]}"), not the C locale's $GATE_WANT"; fi ;;
+    *:1*) printf 'skipped: the gate cases under %s need =~ to fail on \\x83op, and here it matches (the locale is missing, or this libc matches it)\n' "$loc" ;;
+    *) bad "the gate check under $loc printed nothing" ;;
+  esac
+done
+# Before bash 5 a long text holding a backslash goes through perl and tr; failing stubs force the builtin route, and the two must yield the same bytes.
+mkdir -p "$WORK/perl-shim" "$WORK/perl-tr-stub"
+printf '#!/bin/sh\n: >>"%s/perl-ran"\nexec "%s" "$@"\n' "$WORK" "$(command -v perl)" >"$WORK/perl-shim/perl"
+printf '#!/bin/sh\nexit 1\n' >"$WORK/perl-tr-stub/perl"
+cp "$WORK/perl-tr-stub/perl" "$WORK/perl-tr-stub/tr"
+chmod +x "$WORK/perl-shim/perl" "$WORK/perl-tr-stub/perl" "$WORK/perl-tr-stub/tr"
+LONG_CONT=$(printf 'x "y" \\\n%.0s' {1..150}; printf x); LONG_CONT=${LONG_CONT%x}
+LONG_BS=$(printf '\\%.0s' {1..600}; printf '\n\\\n\n'; printf x); LONG_BS=${LONG_BS%x}
+LONG_MB=$(printf '\303\251\\\n\303\\\n\251 $"a" %.0s' {1..80}; printf '\n\134'; printf x); LONG_MB=${LONG_MB%x}
+for text in "$LONG_CONT" "$LONG_BS" "$LONG_MB"; do
+  routed=$(PATH="$WORK/perl-shim:$PATH" normalize_cmd "$text"; printf x)
+  builtin=$(PATH="$WORK/perl-tr-stub:$PATH" normalize_cmd "$text"; printf x)
+  if [ "$routed" = "$builtin" ]; then ok; else bad "the perl/tr route normalizes a ${#text}-character text differently from the builtin one"; fi
+done
+if [ "${BASH_VERSINFO[0]}" -lt 5 ]; then
+  if [ -e "$WORK/perl-ran" ]; then ok; else bad "control: perl never ran, so the comparison above checked the builtin route against itself"; fi
+elif [ -e "$WORK/perl-ran" ]; then bad "bash $BASH_VERSION took the perl route, which only bash before 5 needs"; else ok; fi
+# Bash 3.2 spent over a minute stripping these 800 continuations, past the hook's 30 s timeout, and a hook killed at its timeout lets the command run unchecked.
+if [ -x /bin/bash ] && [ "$(/bin/bash -c 'echo "${BASH_VERSINFO[0]}"')" -lt 5 ]; then
+  jq -n --arg c "$(printf 'echo "line %s" \\\n' {1..800})" --arg s "$SESSION_ID" '{session_id:$s, tool_input:{command:$c}}' >"$WORK/cont.json"
+  SECONDS=0
+  /bin/bash "$COPY/scripts/bash-secret-authority.sh" <"$WORK/cont.json" >"$OUT" 2>"$ERR"
+  assert_exit "800 continuations under /bin/bash pass" 0 $?
+  if [ "$SECONDS" -le 10 ]; then ok; else bad "800 continuations took ${SECONDS}s under /bin/bash $(/bin/bash -c 'echo "$BASH_VERSION"')"; fi
+  # macOS's codeset-only LC_CTYPE=UTF-8 names no language and must take the same route.
+  rm -f "$WORK/perl-ran"
+  # shellcheck disable=SC2016  # expanded by the inner bash
+  env -u LC_ALL -u LANG LC_CTYPE=UTF-8 PATH="$WORK/perl-shim:$PATH" /bin/bash -c '. "$1"; normalize_cmd "$2" >/dev/null' _ "$PLUGIN_ROOT/scripts/strip-cmd.sh" "$LONG_CONT"
+  if [ -e "$WORK/perl-ran" ]; then ok; else bad "under LC_CTYPE=UTF-8 bash 3.2 skipped the perl route"; fi
+else
+  echo "skipped: the 800-continuation timing needs a /bin/bash before 5"
+fi
+
 echo "=== PEM cannot be allowlisted ==="
 
 # The header family widened with the shapes; a form the ignore-rule missed could be listed and would blind the guard to every key of that family.
@@ -597,7 +921,7 @@ if [ -s "$OUT" ]; then bad "a bare word 'cat' must not produce an ask"; else ok;
 # Every guard must fail closed on an unreadable payload — the first pass fixed only the three the review named.
 COPY=$(plugin_copy nojq-all)
 printf '#!/bin/sh\nexit 127\n' >"$COPY/jq"; chmod +x "$COPY/jq"
-for guard in secret-mask-guard.sh read-secret-guard.sh read-secret-guard-bash.sh op-read-guard.sh; do
+for guard in secret-mask-guard.sh read-secret-guard.sh read-secret-guard-bash.sh op-read-guard.sh bash-secret-authority.sh; do
   jq -n '{tool_name:"Read", tool_input:{file_path:"/a/.env", command:"cat /a/.env"}}' \
     | PATH="$COPY:$PATH" "$COPY/scripts/$guard" >"$OUT" 2>"$ERR"
   assert_exit "$guard blocks when jq cannot run" 2 $?
