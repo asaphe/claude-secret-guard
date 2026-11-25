@@ -104,5 +104,16 @@ rm -rf "/tmp/sm-cache-$SESSION"
 run op-cache.sh op empty --mask "op://V/I/f"
 if [ -s "$WORK/err" ]; then ok "op-cache: the empty case names itself on stderr"; else bad "op-cache: the empty case names itself on stderr" "no diagnostic emitted"; fi
 
+# An exported SHELLOPTS=noclobber refused the overwrite, so --refresh failed on every cached value; env, as SHELLOPTS is readonly here.
+for spec in op-cache.sh:op:op://V/I/f sm-cache.sh:aws:some-secret-id; do
+  IFS=: read -r script upstream ref <<<"$spec"
+  SESSION="cachetest-noclobber-$$-$RANDOM"
+  stub "$upstream" good
+  PATH="$WORK/bin:$PATH" CLAUDE_CODE_SESSION_ID="$SESSION" bash "$ROOT/scripts/$script" --mask "$ref" >/dev/null 2>"$WORK/err"
+  PATH="$WORK/bin:$PATH" CLAUDE_CODE_SESSION_ID="$SESSION" env SHELLOPTS=noclobber bash "$ROOT/scripts/$script" --refresh --mask "$ref" >/dev/null 2>"$WORK/err"
+  expect_exit "${script%.sh}: --refresh overwrites the cached value under noclobber" 0 "$?"
+  rm -rf "/tmp/op-cache-$SESSION" "/tmp/sm-cache-$SESSION"
+done
+
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

@@ -81,5 +81,5 @@ if [ -z "$VALUE" ]; then
 fi
 
 umask 077
-printf '%s' "$VALUE" > "$CACHE_FILE"
+printf '%s' "$VALUE" >| "$CACHE_FILE" # >| because an inherited noclobber refused the overwrite --refresh exists for
 emit
