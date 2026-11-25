@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 # PreToolUse Bash hook, mirrors read-secret-guard.sh's basename gate for cat/head/tail/less/grep readers.
 
+# First, and in ASCII: an option or locale inherited from the environment changes how every line below runs - see README § Inherited options and locales.
+set +o keyword +o noclobber
+_sg_mb=$'\xe2\x80\x94'; [ ${#_sg_mb} -eq 1 ] || { printf -v _sg_mb '\\x%x' {128..255}; printf -v _sg_mb '%b' "$_sg_mb"; [ ${#_sg_mb} -eq 128 ]; } || { _sg_mb=$'\xe4\x5c'; [ ${#_sg_mb} -ne 1 ] || SG_ASCII_TRAIL=1; LC_ALL=C; export LC_ALL SG_ASCII_TRAIL; }
+
 if [ -n "${SGA_PREPARSED:-}" ]; then
   INPUT=$SGA_INPUT; CMD=$SGA_CMD
 else
@@ -56,6 +60,12 @@ ask() {
 case "$CMD" in
   *[$'\001\002\003\004\005']*) ask "READ-SECRET GUARD: command contains reserved tokenizer control bytes and cannot be inspected safely." "ask:inspection" ;;
 esac
+# Where the decoder joins an ASCII byte to a character (Shift-JIS, GBK, Big5, macOS EUC), the shell takes a \, | or ` after a non-ASCII byte into it and splits a word the C scan below does not — see README § Inherited options and locales.
+if [ -n "${SG_ASCII_TRAIL:-}" ]; then
+  case $CMD in
+    *[$'\200'-$'\377'][\\\|\`]*) ask "READ-SECRET GUARD: under this locale the shell reads a \\, | or \` right after a non-ASCII character as part of that character, so it splits this command into different words than this guard sees, and a secret file it reads could go unflagged. Confirm before its contents enter context/transcript." "ask:inspection" ;;
+  esac
+fi
 
 # What the prompt can honestly say about a pattern that is never expanded for the verdict — an absolute glob has no cwd dependence, so naming its matches is reproducible where naming a relative one's would not be; see README § What an unresolved glob prompt says.
 describe_glob() {
@@ -426,6 +436,8 @@ SCAN_DEADLINE=20
 BRACE_BUDGET=512
 # ASCII A through z, the order bash walks a letter range in, punctuation between the cases included.
 RANGE_CHARS='ABCDEFGHIJKLMNOPQRSTUVWXYZ[\]^_`abcdefghijklmnopqrstuvwxyz'
+# What tr deletes from an over-budget word, for when tr cannot run; quadratic on bash 3.2, so never the first choice.
+SG_BRACE_CHARS='[{},]'
 
 # Each comma list or range in braces becomes its alternatives, as the shell expands it, so `{*.pem,*.key}` is judged as `*.pem` and `*.key`; anything it cannot expand within budget fails closed.
 expand_braces() {  # expand_braces <word>; fills BRACE_ALTS
@@ -465,7 +477,7 @@ expand_braces() {  # expand_braces <word>; fills BRACE_ALTS
 # One wording for every hit, so the approver always learns which word, where it sits, and what approving lets happen — see README § What a reader-gate prompt says.
 ask_read() {  # ask_read <word> <what it looks like>
   local w=$1
-  [ ${#w} -le 200 ] || w="${w:0:200}…"  # the word appears twice in an argv string Linux caps at 128 KB
+  [ ${#w} -le 200 ] || w="${w:0:200}"$'\xe2\x80\xa6'  # the word appears twice in an argv string Linux caps at 128 KB; an escape, as no code byte may be non-ASCII
   ask "READ-SECRET GUARD: flagged \`$w\` in $WHERE — $2. The guard cannot tell whether this command reads that file or only mentions the name as text. Approving runs the command as written: if it does read the file, its contents enter the context/transcript. Approve only if \`$w\` is not a file this command reads." "${3:-ask:literal}"
 }
 
@@ -517,7 +529,7 @@ while IFS= read -r -d '' token || { SCAN_EOF=1; false; }; do
   if [[ $token == *\{*\}* ]] && [[ $token == *,* || $token == *..* ]]; then
     # shellcheck disable=SC2031  # past the budget a word asks if a stem, or its start, remains once braces and commas go; tr keeps that linear on 3.2
     if ! expand_braces "$token"; then
-      FLAT=$FLAT_TOKEN; [ -n "$FLAT_READ" ] || FLAT=$(export LC_ALL=C; printf '%s' "$token" | tr -d '{},')
+      FLAT=$FLAT_TOKEN; [ -n "$FLAT_READ" ] || FLAT=$(export LC_ALL=C; printf '%s' "$token" | tr -d '{},') || FLAT=${token//$SG_BRACE_CHARS/}
       if [[ $FLAT =~ $RE_STEM_ANY ]] || [[ $FLAT =~ $RE_STEM_FRAG ]] || [[ $FLAT =~ $RE_KEY_PATH ]]; then
         ask_read "$token" "a brace list or range this gate could not expand within its budget, holding what looks like a secret file name" "ask:wildcard"
       fi

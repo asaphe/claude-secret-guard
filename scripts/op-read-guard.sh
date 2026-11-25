@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 # 1Password duplicate-read guard — keys on the parsed secret identity (account, item, fields), never the raw command text, so two fields of one item are distinct reads and a flag reorder is not a new one.
 
+# First, and in ASCII: an option or locale inherited from the environment changes how every line below runs - see README § Inherited options and locales.
+set +o keyword +o noclobber
+_sg_mb=$'\xe2\x80\x94'; [ ${#_sg_mb} -eq 1 ] || { printf -v _sg_mb '\\x%x' {128..255}; printf -v _sg_mb '%b' "$_sg_mb"; [ ${#_sg_mb} -eq 128 ]; } || { _sg_mb=$'\xe4\x5c'; [ ${#_sg_mb} -ne 1 ] || SG_ASCII_TRAIL=1; LC_ALL=C; export LC_ALL SG_ASCII_TRAIL; }
+
 SGA_DIR=${BASH_SOURCE[0]%/*}; [ "$SGA_DIR" != "${BASH_SOURCE[0]}" ] || SGA_DIR=.
 # Run as its own process, nothing has parsed the payload yet, whatever the environment claims.
 [ "${BASH_SOURCE[0]}" != "$0" ] || unset SGA_PREPARSED SGA_INPUT SG_NC_PRIMED

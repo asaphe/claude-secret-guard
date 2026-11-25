@@ -68,7 +68,13 @@ payload blocks the call rather than being read as "nothing to inspect" —
 `jq -r '… // empty'` returns an empty string when `jq` is missing or the
 JSON does not parse, and every check downstream treats empty as "nothing
 here", which silently disarms the guard. That is deliberate and it is not
-free: with `jq` absent, every guarded call is refused.
+free: with `jq` absent, every guarded call is refused. **The same holds for
+`grep`**, which makes every verdict: a `grep` that cannot run matches
+nothing, so the Bash, Read, Write and prompt hooks refuse the call when it is
+not on PATH. Every other tool the hooks run either fails toward asking when
+missing or has a builtin stand-in: the Read hook takes the file name by
+expansion rather than `basename`, and the reader drops an over-budget brace
+word's braces by pattern when `tr` cannot run.
 
 `perl` is the exception, on purpose. The reader gate splits a command into
 words with it, and falls back to a bare split when `perl` cannot run, so the
@@ -119,6 +125,44 @@ clear was text that merely *named* the path — a trailing
 `# see scripts/op-cache.sh` used to turn a real fetch into a pass. For the same
 reason `op read` is no longer conditioned on the absence of `op item get`: one
 command can carry both, and the raw read still needs blocking.
+
+### Inherited options and locales
+
+A hook runs with the environment Claude Code was started with, and some of
+that environment changes how bash runs every line of a script. Each hook and
+each Bash stage therefore opens with the same preamble, in ASCII, before any
+line that depends on it:
+
+- **Options from `SHELLOPTS`.** An exported `SHELLOPTS` turns its options on
+  in every bash that starts. Two of them disarmed the guards: `keyword`
+  moves each `local x=…` into the environment of `local`, so a gate built
+  from an empty variable matches nothing, and `noclobber` stops the reader
+  writing into the temporary file it just created, so it inspects no words.
+  The preamble turns both off. No other option changes a verdict, except two
+  that are out of reach: under `noexec` bash runs no line at all, and under
+  `onecmd` it counts the `#!` line as its one command, so neither runs the
+  preamble. Every other bash script on the machine stops working the same
+  way under either.
+- **Legacy multibyte locales.** Claude Code hands the hooks UTF-8. Under
+  Shift-JIS, GBK, Big5, GB18030 or EUC, `grep` matches nothing on a line that
+  holds a byte the locale cannot decode, so any non-ASCII character in a
+  command, a file path or a prompt let it through every guard. Bash also
+  parses its own script in that locale. The preamble recognizes these locales
+  the way the one-`jq` parse does (`—` is neither one character nor three
+  one-byte characters) and switches the hook to the C locale for everything
+  after it, the same locale a hook runs in when none is set. In C each byte
+  is a character, so every ASCII pattern matches the bytes it matches in
+  UTF-8.
+- **What C cannot see.** Under Shift-JIS, GBK, Big5 and GB18030, and under
+  macOS's EUC decoders, the shell that runs the command can take an ASCII
+  byte after a non-ASCII one as part of that character: `cat —\ .env` reads
+  `.env` under Shift-JIS and `cat 日\ .env` does under macOS eucJP, while in
+  UTF-8 and C the backslash escapes the space and the word is `— .env`. So
+  where the locale's decoder joins an ASCII byte to a character (the preamble
+  tests the locale itself, not its name), the reader gate asks about a
+  command that names a reader and has a `\`, `|` or `` ` `` directly after a
+  non-ASCII byte, since it cannot tell which words the shell will see.
+  glibc's EUC decoders join none, so the ask does not fire there.
 
 ## Fetches inside an invoked script
 
@@ -527,9 +571,11 @@ produce. A command that names none of the guarded tools or readers costs one
   `eval`, so it runs only in UTF-8 or where each byte from 0x80 to 0xff is a
   character of its own: an EUC decoder can take a quote as a later byte of a
   character, and a value ending in such a character would end its quoting
-  early. Any other payload or locale, including an empty or unparseable
-  payload, is piped to each stage as before, so each stage refuses
-  or reads it with its own parse and its own message. NUL bytes on stdin are
+  early. The authority's preamble has already switched such a locale to C
+  (see [Inherited options and locales](#inherited-options-and-locales)), so
+  this guards a `hook-payload.sh` sourced without it. Any other payload,
+  including an empty or unparseable one, is piped to each stage as before,
+  so each stage refuses or reads it with its own parse and its own message. NUL bytes on stdin are
   dropped, as `$(cat)` drops them.
 - **Stages are sourced.** Each stage runs in a subshell of the authority, a
   fork rather than a new `bash`, and keeps its own exit, traps and variables.
@@ -584,7 +630,9 @@ which produce the same bytes; without them it falls back to the builtin
 replacement. That holds only in a UTF-8 or C locale, named in full or by
 its codeset alone (macOS's `LC_CTYPE=UTF-8`). In Shift-JIS, GBK or
 Big5, a backslash byte can be the second byte of a character, which bash
-keeps and `perl` would delete, so there the builtin replacement runs.
+keeps and `perl` would delete, so there the builtin replacement runs; a hook's
+preamble switches those locales to C first, so this applies only to
+`strip-cmd.sh` sourced without one.
 
 Trailing newlines are stripped in one pass, never one at a time: the payload
 read uses a command substitution, and the `jq` parse counts them from the end

@@ -498,7 +498,8 @@ else
 fi
 # With LC_ALL and LANG empty a forked stage's locale restore crashes bash 5, too rarely to catch by running; safe: C in a subshell or exported in $(…), a named-locale restore.
 locale_unsafe() {
-  awk '/^[[:space:]]*#/ { prev = $0; next }
+  # The preamble sets C once and never restores it; the preamble check below holds every copy to the authority's.
+  awk '/^[[:space:]]*#/ || /^_sg_mb=/ { prev = $0; next }
     {
       l = $0
       gsub(/\([[:space:]]*(export )?LC_ALL=C;/, "(", l)
@@ -511,7 +512,7 @@ locale_unsafe() {
 # shellcheck disable=SC2016  # a sample script for the lint, never expanded
 printf '%s\n' '  x || LC_ALL=C tr a b <f' '  local LC_ALL=C' '  unset LC_ALL' '  local x LC_ALL' '  printf a | LC_ALL=C read v' \
   '  printf a | LC_ALL=C some_function' '  ( LC_ALL=C; y ); LANG=C z' '  printf -v LC_ALL %s C' '  read -r LANG <f' '  y=$(printf a | LC_ALL=C tr a b)' '  ( LC_ALL=C; [[ a =~ b ]] )' \
-  '  (export LC_ALL=C; tr -d x) <f' '  case ${LC_ALL:-C} in C) ;; esac' >"$WORK/locale-unsafe.sh"
+  '  (export LC_ALL=C; tr -d x) <f' '  case ${LC_ALL:-C} in C) ;; esac' "$(sed -n 6p "$PLUGIN_ROOT/scripts/bash-secret-authority.sh")" >"$WORK/locale-unsafe.sh"
 flagged=$(locale_unsafe "$WORK/locale-unsafe.sh" | sed 's/.*://' | tr '\n' ' ')
 if [ "$flagged" = "1 2 3 4 5 6 7 8 9 10 " ]; then ok; else bad "control: the locale lint flags lines '$flagged' of the sample, not exactly its unsafe lines 1-10"; fi
 unsafe=$(locale_unsafe "$PLUGIN_ROOT"/scripts/*.sh)
@@ -569,6 +570,127 @@ if locale -a 2>/dev/null | grep -x 'ja_JP.SJIS' >/dev/null; then
 else
   echo "skipped: the Shift-JIS brace-file case needs the ja_JP.SJIS locale"
 fi
+
+echo "=== Inherited options and locales ==="
+COPY=$(plugin_copy inherited)
+DASH=$'\xe2\x80\x94'
+run_hook() {  # run_hook <script> <payload> [env argument...]
+  local script=$1 payload=$2
+  shift 2
+  printf '%s' "$payload" | env "$@" "$COPY/scripts/$script" >"$OUT" 2>"$ERR"
+}
+bash_payload() { jq -nc --arg c "$1" --arg s "$SESSION_ID" '{session_id:$s, hook_event_name:"PreToolUse", tool_input:{command:$c}}'; }
+asked() { if [ "$2" -eq 0 ] && grep -qF '"ask"' "$OUT"; then ok; else bad "$1 — expected an ask, got exit $2: $(head -c 160 "$ERR")"; fi; }
+quiet() { if [ "$2" -eq 0 ] && [ ! -s "$OUT" ]; then ok; else bad "$1 — expected a silent pass, got exit $2: $(head -c 160 "$OUT")"; fi; }
+# Every hook the plugin wires, one known verdict each; <prefix> puts a non-ASCII character before the guarded text.
+check_hooks() {  # check_hooks <label> <prefix> [env argument...]
+  local label=$1 pre=$2 cmd
+  shift 2
+  run_hook bash-secret-authority.sh "$(bash_payload "${pre}op read op://v/i/f")" "$@"
+  assert_exit "$label: a raw op read blocks" 2 $?
+  for cmd in 'cat /a/.env' 'cat ~/.ssh/id_rsa' 'cat /a/{1..100}.env'; do
+    run_hook bash-secret-authority.sh "$(bash_payload "$pre$cmd")" "$@"
+    asked "$label: '$cmd' asks" $?
+  done
+  run_hook bash-secret-authority.sh "$(bash_payload "${pre}echo $FRESH > /tmp/fixture-probe")" "$@"
+  assert_exit "$label: writing a key from Bash blocks" 2 $?
+  run_hook bash-secret-authority.sh "$(bash_payload "${pre}ls -la /tmp")" "$@"
+  quiet "$label: a plain command passes" $?
+  run_hook read-secret-guard.sh "$(jq -nc --arg p "/a/$DASH/.kube/config" '{tool_name:"Read", tool_input:{file_path:$p}}')" "$@"
+  asked "$label: the Read hook asks for a kubeconfig" $?
+  run_hook write-secret-guard.sh "$(jq -nc --arg c "$pre$FRESH" '{tool_name:"Write", tool_input:{file_path:"/tmp/fixture-probe", content:$c}}')" "$@"
+  assert_exit "$label: the Write hook blocks a key" 2 $?
+  run_hook paste-secret-guard.sh "$(jq -nc --arg c "$pre$FRESH" '{prompt:$c}')" "$@"
+  if grep -qF '"block"' "$OUT"; then ok; else bad "$label: the prompt hook no longer blocks a pasted key"; fi
+  mkdir -p "/tmp/op-cache-$SESSION_ID-inherited"
+  run_hook op-cache-cleanup.sh "$(jq -nc --arg s "$SESSION_ID-inherited" '{session_id:$s}')" "$@"
+  if [ -e "/tmp/op-cache-$SESSION_ID-inherited" ]; then rm -rf "/tmp/op-cache-$SESSION_ID-inherited"; bad "$label: the Stop hook left the session's cache behind"; else ok; fi
+}
+check_hooks "control" ""
+check_hooks "control, UTF-8 with a non-ASCII character" "echo $DASH; " LC_ALL=en_US.UTF-8
+# keyword moved every `local x=…` into the environment and noclobber kept the reader's token file empty; env, as SHELLOPTS is readonly here.
+for opt in keyword noclobber; do
+  check_hooks "under SHELLOPTS=$opt" "" SHELLOPTS=$opt
+done
+# A legacy decoder leaves UTF-8 undecoded, and grep then matches nothing on the line, so every guard passed it; each hook now matches in C there.
+for loc in ja_JP.SJIS zh_CN.GBK zh_TW.Big5 zh_CN.GB18030 ja_JP.eucJP ko_KR.eucKR; do
+  if locale -a 2>/dev/null | grep -x "$loc" >/dev/null; then
+    check_hooks "under LC_ALL=$loc" "echo $DASH; " LC_ALL=$loc
+  else
+    echo "skipped: the $loc cases need a locale by that name"
+  fi
+done
+if locale -a 2>/dev/null | grep -x 'ja_JP.SJIS' >/dev/null; then
+  check_hooks "under LC_CTYPE=ja_JP.SJIS alone" "echo $DASH; " -u LC_ALL -u LANG LC_CTYPE=ja_JP.SJIS
+  # The shell itself joins a \ after a non-ASCII byte to that character, so `—\ .env` names .env there and one word with a space in UTF-8.
+  run_hook bash-secret-authority.sh "$(bash_payload "cat $DASH\\ .env")" LC_ALL=ja_JP.SJIS
+  asked "under Shift-JIS a backslash after a non-ASCII character asks" $?
+  if grep -qF 'under this locale the shell reads' "$OUT"; then ok; else bad "under Shift-JIS the backslash ask lost its reason: $(head -c 160 "$OUT")"; fi
+  run_hook bash-secret-authority.sh "$(bash_payload "cat $DASH| tr a b")" LC_ALL=ja_JP.SJIS
+  asked "under Shift-JIS a pipe after a non-ASCII character asks" $?
+else
+  echo "skipped: the LC_CTYPE and joined-byte cases need the ja_JP.SJIS locale"
+fi
+run_hook bash-secret-authority.sh "$(bash_payload "cat $DASH\\ .env")" LC_ALL=en_US.UTF-8
+quiet "control: in UTF-8 a backslash after a non-ASCII character is an escape" $?
+# The oracle is the shell itself: wherever bash splits `<char>\ .env` into two words, the reader must ask.
+printf "printf '[%%s]' %s\\\\ .env\n" $'\xe6\x97\xa5' >"$WORK/joined.sh"
+for loc in ja_JP.SJIS zh_CN.GBK zh_TW.Big5 zh_CN.GB18030 ja_JP.eucJP ko_KR.eucKR en_US.UTF-8; do
+  locale -a 2>/dev/null | grep -x "$loc" >/dev/null || continue
+  split=$(LC_ALL=$loc bash "$WORK/joined.sh" 2>/dev/null | grep -c '\]\[')
+  run_hook bash-secret-authority.sh "$(bash_payload "cat "$'\xe6\x97\xa5'"\\ .env")" LC_ALL=$loc
+  rc=$?
+  # Asking where the shell keeps the escape only costs a prompt, so outside UTF-8 a pass is not required.
+  if [ "$split" -eq 1 ]; then asked "under $loc, where bash splits a backslash off a character, the reader asks" $rc
+  elif [ "$loc" = en_US.UTF-8 ]; then quiet "control: under $loc bash keeps the escape and the reader passes" $rc; fi
+done
+if locale -a 2>/dev/null | grep -x 'ja_JP.eucJP' >/dev/null; then
+  # The reader's own `…` once took its closing quote under EUC, so every reader command asked that the inspection stopped partway.
+  run_hook bash-secret-authority.sh "$(bash_payload 'cat notes.txt')" LC_ALL=ja_JP.eucJP
+  quiet "under eucJP a plain read passes" $?
+  run_hook bash-secret-authority.sh "$(bash_payload "cat /a/$(printf 'x%.0s' {1..210})/.env")" LC_ALL=ja_JP.eucJP
+  asked "under eucJP a long secret path asks" $?
+  if grep -qF 'flagged' "$OUT"; then ok; else bad "under eucJP a long secret path asked for the wrong reason: $(head -c 160 "$OUT")"; fi
+else
+  echo "skipped: the EUC controls need the ja_JP.eucJP locale"
+fi
+# A PATH without one tool: grep's absence read as "no match" everywhere, basename's emptied the Read hook's file name, and tr's the brace fallback's word.
+without() {  # without <tool>: prints a PATH directory holding every tool the hooks run except <tool>
+  local dir="$WORK/without-$1" t
+  mkdir -p "$dir"
+  for t in bash env jq mktemp grep sed cat rm head tail awk perl dirname basename wc tr date mkdir chmod find sort cut uniq xargs; do
+    [ "$t" = "$1" ] || ln -sf "$(command -v "$t")" "$dir/$t"
+  done
+  printf '%s' "$dir"
+}
+NO_GREP=$(without grep)
+for hook in bash-secret-authority.sh:"$(bash_payload 'ls -la /tmp')" read-secret-guard.sh:'{"tool_name":"Read","tool_input":{"file_path":"/a/notes.txt"}}' \
+            write-secret-guard.sh:'{"tool_name":"Write","tool_input":{"file_path":"/tmp/x","content":"hello"}}' paste-secret-guard.sh:'{"prompt":"hello"}'; do
+  printf '%s' "${hook#*:}" | PATH="$NO_GREP" "$NO_GREP/bash" "$COPY/scripts/${hook%%:*}" >"$OUT" 2>"$ERR"
+  assert_exit "without grep ${hook%%:*} blocks" 2 $?
+  assert_err_has "without grep ${hook%%:*} names grep" "grep is not on PATH"
+done
+NO_BASENAME=$(without basename)
+for path in /a/.env /a/.env/ /a/id_rsa; do
+  jq -nc --arg p "$path" '{tool_name:"Read", tool_input:{file_path:$p}}' | PATH="$NO_BASENAME" "$NO_BASENAME/bash" "$COPY/scripts/read-secret-guard.sh" >"$OUT" 2>"$ERR"
+  asked "without basename the Read hook asks for $path" $?
+done
+NO_TR=$(without tr)
+for cmd in 'cat /a/{1..100}.env' 'cat /a/{.env,b}'; do
+  bash_payload "$cmd" | PATH="$NO_TR" "$NO_TR/bash" "$COPY/scripts/bash-secret-authority.sh" >"$OUT" 2>"$ERR"
+  asked "without tr '$cmd' asks" $?
+done
+# Every hook and Bash stage opens with the same preamble, before any line bash would parse under the inherited state.
+PREAMBLE=$(sed -n '3,6p' "$PLUGIN_ROOT/scripts/bash-secret-authority.sh")
+case $PREAMBLE in *'set +o keyword +o noclobber'*'export LC_ALL SG_ASCII_TRAIL'*) ok ;; *) bad "control: the authority's preamble is not where this check reads it" ;; esac
+for script in $(jq -r '.. | .command? // empty' "$PLUGIN_ROOT/hooks/hooks.json" | sed 's#.*/scripts/##') \
+              $(sed -n 's/.*sg_stage \([a-z-]*\.sh\).*/\1/p' "$PLUGIN_ROOT/scripts/bash-secret-authority.sh"); do
+  checked=$((${checked:-0} + 1))
+  if [ "$(sed -n '3,6p' "$PLUGIN_ROOT/scripts/$script")" = "$PREAMBLE" ]; then ok; else bad "$script does not open with the shared preamble"; fi
+  if sed -n '1,2p' "$PLUGIN_ROOT/scripts/$script" | grep -qv '^#'; then bad "$script runs a line before its preamble"; else ok; fi
+done
+# Six wired hooks and four stages, op-read-guard.sh in both lists.
+if [ "${checked:-0}" -eq 10 ]; then ok; else bad "control: the preamble check read ${checked:-0} scripts, not the 6 hooks and 4 stages"; fi
 
 echo "=== Normalization memo and gates ==="
 # shellcheck source-path=SCRIPTDIR/../scripts

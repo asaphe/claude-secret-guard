@@ -1,6 +1,13 @@
 #!/usr/bin/env bash
 # Single PreToolUse Bash authority for this plugin's block/ask stages — see README § Why one Bash authority script, not several parallel hooks.
 
+# First, and in ASCII: an option or locale inherited from the environment changes how every line below runs - see README § Inherited options and locales.
+set +o keyword +o noclobber
+_sg_mb=$'\xe2\x80\x94'; [ ${#_sg_mb} -eq 1 ] || { printf -v _sg_mb '\\x%x' {128..255}; printf -v _sg_mb '%b' "$_sg_mb"; [ ${#_sg_mb} -eq 128 ]; } || { _sg_mb=$'\xe4\x5c'; [ ${#_sg_mb} -ne 1 ] || SG_ASCII_TRAIL=1; LC_ALL=C; export LC_ALL SG_ASCII_TRAIL; }
+
+# Every verdict below is a grep, and a grep that cannot run matches nothing, which reads as safe - see README § Failing closed.
+command -v grep >/dev/null 2>&1 || { echo "SECRET GUARD: grep is not on PATH. Blocking: the guard cannot confirm this command is safe." >&2; exit 2; }
+
 # Inherited from the environment, these would tell a stage that a payload nobody parsed was already parsed.
 unset SGA_PREPARSED SG_NC_PRIMED
 HOOKS_DIR=${BASH_SOURCE[0]%/*}; [ "$HOOKS_DIR" != "${BASH_SOURCE[0]}" ] || HOOKS_DIR=.

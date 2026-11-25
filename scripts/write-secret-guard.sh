@@ -1,6 +1,13 @@
 #!/usr/bin/env bash
 # PreToolUse hook (Write|Edit|MultiEdit|NotebookEdit). Content-scans the new text for the same near-zero-FP shapes as the prompt guard, before it lands in a file.
 
+# First, and in ASCII: an option or locale inherited from the environment changes how every line below runs - see README § Inherited options and locales.
+set +o keyword +o noclobber
+_sg_mb=$'\xe2\x80\x94'; [ ${#_sg_mb} -eq 1 ] || { printf -v _sg_mb '\\x%x' {128..255}; printf -v _sg_mb '%b' "$_sg_mb"; [ ${#_sg_mb} -eq 128 ]; } || { _sg_mb=$'\xe4\x5c'; [ ${#_sg_mb} -ne 1 ] || SG_ASCII_TRAIL=1; LC_ALL=C; export LC_ALL SG_ASCII_TRAIL; }
+
+# Every verdict below is a grep, and a grep that cannot run matches nothing, which reads as safe - see README § Failing closed.
+command -v grep >/dev/null 2>&1 || { echo "WRITE-SECRET GUARD: grep is not on PATH. Blocking: the guard cannot confirm this call is free of secret-shaped literals." >&2; exit 2; }
+
 # shellcheck source-path=SCRIPTDIR
 source "$(dirname "${BASH_SOURCE[0]}")/secret-shapes.sh"
 # An unset pattern makes grep match every byte, so the guard would block all content while looking like it found a secret in it.
