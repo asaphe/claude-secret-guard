@@ -1,31 +1,48 @@
 #!/usr/bin/env bash
 # Single PreToolUse Bash authority for this plugin's block/ask stages — see README § Why one Bash authority script, not several parallel hooks.
 
-HOOKS_DIR="$(dirname "${BASH_SOURCE[0]}")"
-INPUT=$(cat)
+# Inherited from the environment, these would tell a stage that a payload nobody parsed was already parsed.
+unset SGA_PREPARSED SG_NC_PRIMED
+HOOKS_DIR=${BASH_SOURCE[0]%/*}; [ "$HOOKS_DIR" != "${BASH_SOURCE[0]}" ] || HOOKS_DIR=.
+# Checked first: in posix mode a . that cannot open its file exits the shell.
+# shellcheck source-path=SCRIPTDIR
+{ [ -f "$HOOKS_DIR/hook-payload.sh" ] && [ -r "$HOOKS_DIR/hook-payload.sh" ] && . "$HOOKS_DIR/hook-payload.sh" 2>/dev/null && sg_read_payload; } || SGA_INPUT=$(cat)
 
-BLOCK_OUT=$(printf '%s' "$INPUT" | bash "$HOOKS_DIR/secret-mask-guard.sh")
+# Each stage is sourced in a subshell, a fork: BASH_ENV (read by every exec'd bash) or FUNCNEST (sg_stage adds a level) keeps each stage its own bash.
+if [ -z "${BASH_ENV:-}" ] && [ -z "${FUNCNEST:-}" ] && sg_parse_payload 2>/dev/null; then
+  # One sed for the call instead of one per stage; a stage that cannot source this fails exactly as it did, since each still sources it itself.
+  # shellcheck source-path=SCRIPTDIR
+  [ -z "$SGA_CMD" ] || { . "$HOOKS_DIR/strip-cmd.sh" && normalize_cmd_prime "$SGA_CMD"; } 2>/dev/null
+  # A stage file that cannot be sourced is exec'd, so bash reports it as it always did.
+  # shellcheck source=/dev/null
+  sg_stage() { if [ -f "$HOOKS_DIR/$1" ] && [ -r "$HOOKS_DIR/$1" ]; then ( SECONDS=0; . "$HOOKS_DIR/$1" ); else printf '%s' "$SGA_INPUT" | bash "$HOOKS_DIR/$1"; fi; }
+else
+  # Any payload the one-jq parse does not take is piped to each stage exactly as before, so each refuses or reads it with its own parse.
+  sg_stage() { printf '%s' "$SGA_INPUT" | bash "$HOOKS_DIR/$1"; }
+fi
+
+BLOCK_OUT=$(sg_stage secret-mask-guard.sh)
 BLOCK_CODE=$?
 if [ "$BLOCK_CODE" -ne 0 ]; then
   [ -n "$BLOCK_OUT" ] && printf '%s\n' "$BLOCK_OUT" >&2
   exit "$BLOCK_CODE"
 fi
 
-WRITE_BLOCK_OUT=$(printf '%s' "$INPUT" | bash "$HOOKS_DIR/write-secret-guard-bash.sh")
+WRITE_BLOCK_OUT=$(sg_stage write-secret-guard-bash.sh)
 WRITE_BLOCK_CODE=$?
 if [ "$WRITE_BLOCK_CODE" -ne 0 ]; then
   [ -n "$WRITE_BLOCK_OUT" ] && printf '%s\n' "$WRITE_BLOCK_OUT" >&2
   exit "$WRITE_BLOCK_CODE"
 fi
 
-DUP_OUT=$(printf '%s' "$INPUT" | bash "$HOOKS_DIR/op-read-guard.sh")
+DUP_OUT=$(sg_stage op-read-guard.sh)
 DUP_CODE=$?
 if [ "$DUP_CODE" -ne 0 ]; then
   [ -n "$DUP_OUT" ] && printf '%s\n' "$DUP_OUT" >&2
   exit "$DUP_CODE"
 fi
 
-ASK_OUT=$(printf '%s' "$INPUT" | bash "$HOOKS_DIR/read-secret-guard-bash.sh")
+ASK_OUT=$(sg_stage read-secret-guard-bash.sh)
 ASK_CODE=$?
 # Without this the reader's own fail-closed branch is inert on the wired path: only its stdout was read, so a non-zero exit reached the caller as a plain allow.
 if [ "$ASK_CODE" -ne 0 ]; then

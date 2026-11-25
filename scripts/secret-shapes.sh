@@ -20,7 +20,8 @@ SECRET_SHAPES_COMPLETE="$SECRET_GUARD_KEY_HEADER|$SECRET_SHAPES_BOUNDED"
 SECRET_PATTERN="((^|[^0-9A-Za-z]|\\\\[nrtv])($SECRET_SHAPES_BOUNDED|$SECRET_SHAPES_PREFIX_ONLY)|$SECRET_GUARD_KEY_HEADER)"
 
 # Resolved from this file rather than the plugin root so a guard always reads the allowlist shipped beside it.
-SECRET_GUARD_ALLOWLIST="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/fixtures.allow"
+_sg_shapes_dir=${BASH_SOURCE[0]%/*}; [ "$_sg_shapes_dir" != "${BASH_SOURCE[0]}" ] || _sg_shapes_dir=.
+SECRET_GUARD_ALLOWLIST="$(cd "$_sg_shapes_dir/.." && pwd)/fixtures.allow"
 
 # Allowlist entries with comments and blanks dropped; non-zero if the file cannot be read.
 fixture_allowlist() {

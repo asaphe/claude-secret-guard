@@ -503,6 +503,94 @@ block-before-rewrite inside one script sidesteps that ambiguity entirely.
 If you add your own Bash hook alongside this plugin, keep that in mind —
 especially if yours rewrites `tool_input.command`.
 
+### Process launches per call
+
+The authority and `op-read-guard.sh` run on every Bash call, and every
+process they launch is one more event for anything that audits process
+launches, such as an endpoint security agent. So the hot path launches as few
+processes as it can while producing exactly the output it would otherwise
+produce. A command that names none of the guarded tools or readers costs one
+`jq`, one `sed` and one `grep`.
+
+- **Exec form.** `hooks/hooks.json` sets `args`, so Claude Code spawns each
+  script directly instead of through `sh -c`.
+- **One parse.** `scripts/hook-payload.sh` reads the payload with the `read`
+  builtin and extracts the command, event and session id with one `jq`. It
+  does so only for a single JSON object whose fields are each a string or
+  absent, which is the shape where every stage's own `jq -r '.x // empty'`
+  returns the same text. A field holding `\u0000` is not that shape: bash
+  drops the NUL from a stage's own `$(jq -r …)`, so `op rea\u0000d` reads as
+  `op read`, while one `jq` would hand the stages the escape. Neither is a
+  payload with no session id, from the payload or `CLAUDE_CODE_SESSION_ID`,
+  because the duplicate-read tracker is then named after the parent process,
+  which a sourced stage does not share. The parse hands jq's shell quoting to
+  `eval`, so it runs only in UTF-8 or where each byte from 0x80 to 0xff is a
+  character of its own: an EUC decoder can take a quote as a later byte of a
+  character, and a value ending in such a character would end its quoting
+  early. Any other payload or locale, including an empty or unparseable
+  payload, is piped to each stage as before, so each stage refuses
+  or reads it with its own parse and its own message. NUL bytes on stdin are
+  dropped, as `$(cat)` drops them.
+- **Stages are sourced.** Each stage runs in a subshell of the authority, a
+  fork rather than a new `bash`, and keeps its own exit, traps and variables.
+  With `BASH_ENV` set, which every new `bash` reads, each stage still runs as
+  its own `bash`, as does a stage file the authority cannot read, and so does
+  every stage under an inherited `FUNCNEST`, since a sourced stage runs one
+  function level deeper. So does every stage when an option that acts on the
+  lines that changed differs from a script's default, as `SHELLOPTS=errexit`,
+  `POSIXLY_CORRECT` or `BASHOPTS=nocasematch` make it: only the defaults take
+  the one-jq route.
+- **One normalization.** `normalize_cmd` is a pure function, and every stage
+  normalizes the same command. The authority computes it once, and a stage's
+  call with that same text reuses the result byte for byte.
+- **Gates that exec nothing.** Normalization only deletes characters
+  (`\`, newline, `$`, `"` and `'`). So if the raw text cannot spell a word
+  with only those characters between its letters, no normalized text can
+  contain the word, and no predicate that needs it can match. `norm_may_hold`
+  tests that with bash's own regex engine before the `grep` that needs the
+  word. A false answer skips the `grep`, and a true one runs it unchanged. In a
+  UTF-8 locale bash's `=~` fails on any invalid byte, which would read as
+  "cannot contain the word", the one answer a gate must never give wrongly.
+  So the gate's answer is the C locale's, and it gets it without a subprocess
+  wherever it can. A match in the stage's own locale stands: a wrong "may
+  contain" only costs the `grep`. ASCII text matches these ASCII patterns
+  alike in every locale. In UTF-8, and where every character is one byte, no
+  ASCII byte can be part of another character, so a miss over text that
+  decodes is the C locale's miss too. The gate recognizes those locales by
+  `—` counting as one character or three. Text that does not decode, and
+  text in any other locale (in Shift-JIS, GBK or Big5 a character's second
+  byte can be an ASCII one), is tested in the C locale, in a subshell. The
+  gate never sets and then restores the stage's locale: in a
+  forked stage with `LC_ALL` and `LANG` empty, that restore can crash bash 5,
+  and under an invalid locale it prints a warning each time.
+- **One grep per boolean.** Several `grep -qE` calls over the same input
+  that feed one yes/no answer are merged into one alternation. A line
+  matches the merged pattern exactly when it matches one of the parts.
+- **Segments are gated too.** The mask guard splits a command into segments,
+  and a heredoc gives one segment per line. A `sed` and three `grep`s on every
+  line of a 500-line heredoc take about 40 s. That is past the hook timeout,
+  and a hook killed at its timeout lets the command through unchecked. So each
+  segment is gated as above, and a line that cannot spell `op` and one of its
+  subcommands costs nothing.
+
+On bash 3.2, the `/bin/bash` macOS ships, `${var//pattern/replacement}`
+takes time proportional to the number of matches times the length of the
+string. Replacing the newlines of a 37 KB, 500-line command took about 50 s.
+Where such a replacement can run over a whole command, the code uses `tr`
+instead. `normalize_cmd` deletes continuations and backslashes by pattern, and
+4 KB of mixed backslashes and newlines took 11 s on bash 3.2. Before bash 5, a
+text over 512 characters holding a backslash goes through `perl` and `tr`,
+which produce the same bytes; without them it falls back to the builtin
+replacement. That holds only in a UTF-8 or C locale, named in full or by
+its codeset alone (macOS's `LC_CTYPE=UTF-8`). In Shift-JIS, GBK or
+Big5, a backslash byte can be the second byte of a character, which bash
+keeps and `perl` would delete, so there the builtin replacement runs.
+
+Trailing newlines are stripped in one pass, never one at a time: the payload
+read uses a command substitution, and the `jq` parse counts them from the end
+of the string. Copying the string once per newline took 14 s for 20,000 of
+them on stdin under bash 3.2, and 27 s for 60,000 after a command under bash 5.
+
 ## Masked-cache wrappers
 
 `scripts/op-cache.sh` and `scripts/sm-cache.sh` are drop-in replacements

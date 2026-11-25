@@ -18,7 +18,7 @@ usage() {
 rand_chars() {
   local charset="$1" count="$2" out=""
   while [ "${#out}" -lt "$count" ]; do
-    out="${out}$(head -c 256 /dev/urandom | LC_ALL=C tr -dc "$charset")"
+    out="${out}$(export LC_ALL=C; head -c 256 /dev/urandom | tr -dc "$charset")"
   done
   printf '%s' "${out:0:count}"
 }

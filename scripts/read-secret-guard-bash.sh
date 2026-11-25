@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # PreToolUse Bash hook, mirrors read-secret-guard.sh's basename gate for cat/head/tail/less/grep readers.
 
+if [ -n "${SGA_PREPARSED:-}" ]; then
+  INPUT=$SGA_INPUT; CMD=$SGA_CMD
+else
 INPUT=$(cat)
 # An empty or non-object payload parses without error and yields an empty value, which every check below reads as "nothing to inspect" — see README § Failing closed.
 if [ -z "$INPUT" ] || ! printf '%s' "$INPUT" | jq -e 'type == "object"' >/dev/null 2>&1; then
@@ -12,25 +15,30 @@ if ! CMD=$(printf '%s' "$INPUT" | jq -r '.tool_input.command // empty' 2>/dev/nu
   echo "READ-SECRET GUARD: cannot read the hook payload — jq is missing or the JSON did not parse. Blocking: the guard cannot confirm this command is safe." >&2
   exit 2
 fi
+fi
 [ -z "$CMD" ] && exit 0
 
+SGA_DIR=${BASH_SOURCE[0]%/*}; [ "$SGA_DIR" != "${BASH_SOURCE[0]}" ] || SGA_DIR=.
 # shellcheck source-path=SCRIPTDIR
-source "$(dirname "${BASH_SOURCE[0]}")/strip-cmd.sh"
+source "$SGA_DIR/strip-cmd.sh"
 
-# Matched anywhere inside a segment rather than after a fixed wrapper list, which would go silent on any prefix the list omits (timeout, nice, stdbuf, ionice, doas).
+# Matched anywhere inside a segment rather than after a fixed wrapper list, which would go silent on any prefix the list omits (timeout, nice, stdbuf, ionice, doas); a separator bounds a reader name exactly as a line end does.
 SEP=$';&|()`"\''
+# The gate below needs a reader's name, so a command that cannot spell one is cleared before any grep.
+norm_may_re SG_MAY_READER cat head tail less more grep
+norm_may_hold "$CMD" "$SG_MAY_READER" || exit 0
 # Normalized like the mask guard's predicates, or a quoted reader name (`"cat" secrets.pem`) splits into its own segment with no trailing space and matches nothing.
 GATE_CMD=$(normalize_cmd "$CMD")
 # A leading slash admits the same reader named by path, and grep carries no recursive-flag condition: -r decides how many files are read, never whether the one named is a key — see README § Why grep is gated unconditionally.
-printf '%s' "$GATE_CMD" | tr "$SEP" '\n' | grep -qE '(^|[[:space:]]|/)(cat|head|tail|less|more|grep)([[:space:]<]|$)' \
+printf '%s' "$GATE_CMD" | grep -qE "(^|[[:space:]/$SEP])(cat|head|tail|less|more|grep)([[:space:]<$SEP]|\$)" \
   || exit 0
 
 ask() {
   local log session flat
   log=${HOOK_DIAG_ASK_LOG:-${HOME}/.claude/local/hook-ask-decisions.log}
   session=$(printf '%s' "$INPUT" | jq -r '.session_id // empty' | tr -dc 'A-Za-z0-9-')
-  # tr, not ${CMD//$'\n'/ }: on bash 3.2 that substitution takes ~50 s on a 37 KB command, past the hook timeout, so the ask never lands.
-  flat=$(printf '%s' "$CMD" | LC_ALL=C tr '\r\n' '  ')
+  # shellcheck disable=SC2030,SC2031  # tr, not ${CMD//$'\n'/ } (~50 s on bash 3.2 for 37 KB); C by export, as lastpipe restores a LC_ALL=C prefix here
+  flat=$(export LC_ALL=C; printf '%s' "$CMD" | tr '\r\n' '  ')
   # Diagnostics must never replace the permission decision when the log is unwritable.
   { mkdir -p "$(dirname "$log")" && (
     umask 077
@@ -353,8 +361,19 @@ if [ ! -s "$TOKENS_FILE" ]; then
   { printf '\002\n'; printf '%s' "$CMD" | tr -d '"'"'"'\\$' | tr -s ' \t\n<>|;&()`' '\n'; printf '\n'; } | tr '\n' '\0' >"$TOKENS_FILE"
 fi
 # Every word with its braces and commas removed, read in step with the words: one tr here, where a tr per over-budget word cost ~15 ms and a large JSON heredoc has thousands.
-FLAT_FILE=$(mktemp) || FLAT_FILE=""
-[ -z "$FLAT_FILE" ] || LC_ALL=C tr -d '{},' <"$TOKENS_FILE" >"$FLAT_FILE" || : >"$FLAT_FILE"
+case $CMD in
+  # Only a word holding a brace reads it, and no word holds a byte the command does not.
+  *'{'*)
+    FLAT_FILE=$(mktemp) || FLAT_FILE=""
+    # Without LC_ALL and LANG, restoring the locale after tr crashes bash 5 in a forked stage, so there tr gets C from a subshell that execs it and so never restores it.
+    # shellcheck disable=SC2030,SC2031  # the subshell's LC_ALL is meant for tr alone
+    if [ -n "${LC_ALL:-}${LANG:-}" ]; then
+      [ -z "$FLAT_FILE" ] || LC_ALL=C tr -d '{},' <"$TOKENS_FILE" >"$FLAT_FILE" || : >"$FLAT_FILE"
+    else
+      [ -z "$FLAT_FILE" ] || (export LC_ALL=C; exec tr -d '{},') <"$TOKENS_FILE" >"$FLAT_FILE" || : >"$FLAT_FILE"
+    fi
+    ;;
+esac
 
 # Matched with bash's own regex engine rather than a grep per test: this loop runs before every Bash call, and the forks it used to spend cost more than the scan it performs.
 shopt -s nocasematch
@@ -496,9 +515,9 @@ while IFS= read -r -d '' token || { SCAN_EOF=1; false; }; do
   esac
   BRACE_ALTS=("$token")
   if [[ $token == *\{*\}* ]] && [[ $token == *,* || $token == *..* ]]; then
+    # shellcheck disable=SC2031  # past the budget a word asks if a stem, or its start, remains once braces and commas go; tr keeps that linear on 3.2
     if ! expand_braces "$token"; then
-      # Past the budget a word asks if a stem, or the start of one, is left once its braces and commas are removed; tr keeps that linear on bash 3.2.
-      FLAT=$FLAT_TOKEN; [ -n "$FLAT_READ" ] || FLAT=$(printf '%s' "$token" | LC_ALL=C tr -d '{},')
+      FLAT=$FLAT_TOKEN; [ -n "$FLAT_READ" ] || FLAT=$(export LC_ALL=C; printf '%s' "$token" | tr -d '{},')
       if [[ $FLAT =~ $RE_STEM_ANY ]] || [[ $FLAT =~ $RE_STEM_FRAG ]] || [[ $FLAT =~ $RE_KEY_PATH ]]; then
         ask_read "$token" "a brace list or range this gate could not expand within its budget, holding what looks like a secret file name" "ask:wildcard"
       fi
