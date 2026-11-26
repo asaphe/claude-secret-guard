@@ -4,7 +4,7 @@
 # First, and in ASCII: an option or locale inherited from the environment changes how every line below runs - see README § Inherited options and locales.
 set +o keyword +o noclobber
 [ "${LC_ALL:-}" = C ] || unset SG_ASCII_TRAIL; _sg_mb=$'\xe2\x80\x94'; [ ${#_sg_mb} -eq 1 ] || { printf -v _sg_mb '\\x%x' {128..255}; printf -v _sg_mb '%b' "$_sg_mb"; [ ${#_sg_mb} -eq 128 ]; } || { _sg_mb=$'\xe4\x5c'; [ ${#_sg_mb} -ne 1 ] || SG_ASCII_TRAIL=1; LC_ALL=C; export LC_ALL SG_ASCII_TRAIL; }
-
+sg_op_read_guard() {  # One function, so the authority loads this file in its own process and no forked stage opens a script - see README § Process launches per call.
 SGA_DIR=${BASH_SOURCE[0]%/*}; [ "$SGA_DIR" != "${BASH_SOURCE[0]}" ] || SGA_DIR=.
 # Run as its own process, nothing has parsed the payload yet, whatever the environment claims.
 [ "${BASH_SOURCE[0]}" != "$0" ] || unset SGA_PREPARSED SGA_INPUT SG_NC_PRIMED
@@ -53,7 +53,7 @@ if [ -z "$CMD" ]; then
 fi
 
 # shellcheck source-path=SCRIPTDIR
-source "$SGA_DIR/strip-cmd.sh"
+{ [ "${BASH_SOURCE[0]}" != "$0" ] && [[ ${SGA_HAVE-} == *" strip-cmd.sh "* ]]; } || source "$SGA_DIR/strip-cmd.sh"
 # Both predicates below need the word op, so a command that cannot spell it is cleared without a subprocess.
 norm_may_re SG_MAY_OP op
 norm_may_hold "$CMD" "$SG_MAY_OP" || exit 0
@@ -178,7 +178,7 @@ fi
 [ -n "$KEYS" ] || exit 0
 
 # shellcheck source-path=SCRIPTDIR
-source "$SGA_DIR/session-namespace.sh"
+{ [ "${BASH_SOURCE[0]}" != "$0" ] && [[ ${SGA_HAVE-} == *" session-namespace.sh "* ]]; } || source "$SGA_DIR/session-namespace.sh"
 # No fixed "shared" fallback: that name was the same for every user, so on a sticky /tmp the first to create it locked everyone else out through the ownership refusal below, with no way to remove it.
 [ -n "$SESSION_ID" ] || SESSION_ID=$(session_namespace)
 TRACK_FILE="/tmp/claude-op-reads-${SESSION_ID}"
@@ -226,3 +226,6 @@ fi
 # A payload with no event name predates the PostToolUse wiring, where recording here is the only record that ever happens.
 [ -n "$HOOK_EVENT" ] || record
 exit 0
+}
+# Run, or sourced by anything but the authority's loader, the stage runs one function level down, so an inherited FUNCNEST gets that level back.
+if [ -z "${SGA_LOADING:-}" ] || [ "${BASH_SOURCE[0]}" = "$0" ]; then case ${FUNCNEST:-} in '' | 0 | *[!0-9]*) ;; *) FUNCNEST=$((10#$FUNCNEST + 1)) ;; esac; sg_op_read_guard ${1+"$@"}; fi

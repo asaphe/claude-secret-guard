@@ -722,6 +722,22 @@ for text in $'op "read" x\n\n' 'o\p read' "\$'op' read" ''; do
   if [ "$other" = "$(SG_NC_PRIMED='' normalize_cmd "$text \"y\""; printf x)" ]; then ok; else bad "priming $(printf %q "$text") changed another text's normalization"; fi
 done
 unset SG_NC_PRIMED
+# On the authority's route the quote unwrap runs by builtin; it must yield the sed's bytes, run no sed within its budget, and hand anything past it to the sed.
+mkdir -p "$WORK/sed-log"
+printf '#!/bin/sh\n: >>"%s/sed-ran"\nexec "%s" "$@"\n' "$WORK" "$(command -v sed)" >"$WORK/sed-log/sed"; chmod +x "$WORK/sed-log/sed"
+UNQ_IN=('a"b"c' '$"x"' "\$'y'" '"a b"c"' '""' "''" $'a\n""' '$$"a"' '"a"b"' "'it''s'" $'x "y\tz" w' $'"a\nb"' "o\"p\" \$'read' x")
+UNQ_OVER=("$(printf '"q"%.0s' {1..70})" "$(printf 'y%.0s' {1..2100})\"z\"" $'\xc3\xa9"x"')
+unq_check() {  # unq_check <expect sed: 0|1> <text>
+  rm -f "$WORK/sed-ran"
+  local want got
+  want=$(normalize_cmd "$2"; printf x)
+  got=$(SGA_PREPARSED=1 PATH="$WORK/sed-log:$PATH" normalize_cmd "$2"; printf x)
+  if [ "$got" = "$want" ]; then ok; else bad "the builtin unwrap of $(printf %q "${2:0:60}") differs from the sed's"; fi
+  if [ -e "$WORK/sed-ran" ]; then ran=1; else ran=0; fi
+  if [ "$ran" = "$1" ]; then ok; else bad "on the route sed ran=$ran for $(printf %q "${2:0:60}"), expected $1"; fi
+}
+for text in "${UNQ_IN[@]}"; do unq_check 0 "$text"; done
+for text in "${UNQ_OVER[@]}"; do unq_check 1 "$text"; done
 # Every respelling normalize_cmd undoes must still open the gate, or a predicate behind it goes blind to that spelling.
 GATE_OPEN=('op' 'o"p"' "o'p'" 'o\p' $'o\\\np' "o\$'p'" 'o$"p"' $'\xc3\xa9op' $'\xffop' $'op\xff' $'\x83op')
 GATE_SHUT=('o p' 'oxp' 'ls -la /tmp' $'\xc3\xa9xp' $'\xff oxp')
@@ -988,6 +1004,42 @@ assert_err_has "the chain forwards the notice to stderr" "allowed —"
 authority_guard "$COPY" "printf '%s' $FRESH > /tmp/fixture-probe"
 assert_exit "the chain blocks an unlisted value" 2 $?
 assert_err_has "the chain forwards the block reason" "WRITE-SECRET GUARD"
+
+echo "=== Builtin stand-ins match each stage's own route ==="
+
+# BASH_ENV sends every stage through its own bash, parse, sed, grep and perl, so each case must come out byte for byte as on the one-jq route.
+mkdir -p "$WORK/tool-log"
+for tool in grep sed perl tr; do
+  printf '#!/bin/sh\nprintf "%%s\\n" %s >>"%s/tool-log/ran"\nexec "%s" "$@"\n' "$tool" "$WORK" "$(command -v "$tool")" >"$WORK/tool-log/$tool"
+  chmod +x "$WORK/tool-log/$tool"
+done
+route_pair() {  # route_pair <command>: sets ROUTE_TOOLS to the tools the one-jq route ran
+  jq -n --arg c "$1" --arg s "$SESSION_ID" '{session_id:$s, tool_name:"Bash", tool_input:{command:$c}}' >"$WORK/route.json"
+  rm -f "$WORK/tool-log/ran"
+  PATH="$WORK/tool-log:$PATH" "$COPY/scripts/bash-secret-authority.sh" <"$WORK/route.json" >"$WORK/route1.out" 2>"$WORK/route1.err"; r1=$?
+  ROUTE_TOOLS=$(sort -u "$WORK/tool-log/ran" 2>/dev/null | tr '\n' ' ')
+  BASH_ENV=/dev/null "$COPY/scripts/bash-secret-authority.sh" <"$WORK/route.json" >"$WORK/route2.out" 2>"$WORK/route2.err"; r2=$?
+  if [ "$r1" = "$r2" ] && cmp -s "$WORK/route1.out" "$WORK/route2.out" && cmp -s "$WORK/route1.err" "$WORK/route2.err"; then ok
+  else bad "the one-jq route and the stages' own route differ on $(printf %q "$1"): exit $r1 vs $r2"; fi
+}
+# shellcheck disable=SC2016  # command text handed to the guard, never expanded here
+ROUTE_CASES=('ls -la' 'git status' 'cat notes.txt | head -5' 'cat .env' 'cat .e"n"v' "cat .e'n'v" 'cat .e\nv' 'head ~/.s"s"h/config' 'tail -f ~/.kube/config'
+  'cat ID_RSA' 'cat x.PEM' 'cat *.pem' 'cat .e?v' 'cat {.e,x}nv' 'cat .{d..f}nv' 'cat {a},.env}' 'cat .e{n,m}v' "awk '{print \$1}' notes.txt | head"
+  "jq '{a:.b}' f.json | head" 'grep -rn token . 2>/dev/null' 'cat $(echo .env)' 'cat `echo k.pem`' 'cat .env;' 'cat k.pem|head' 'cat<.env' 'cat .e.n.v'
+  $'cat <<\'EOF\' > f\nsee .env\nEOF' $'cat > f <<EOF\n$(cat .env)\nEOF' "printf '%s' $FRESH > /tmp/fixture-probe" "printf '%s' $LISTED > /tmp/fixture-probe"
+  "echo $FRESH 2>&1" "echo $FRESH > f" $'echo a\necho b > f' "git commit -m \"$FRESH\"" "git tag -m \"x $FRESH\" v1" 'op read op://v/i/f' 'o"p" read op://v/i/f'
+  'op item get x --reveal' $'cat \xc3\xa9 .env' "x\"y z\"w \$'q' cat .e\$'n'v" 'sed -i s/a/b/ f' 'curl -o f https://x' 'dd if=a of=b' $'echo a\nopen("f", "w")')
+for c in "${ROUTE_CASES[@]}"; do route_pair "$c"; done
+# Controls: without them the comparisons above could have run the same tools on both routes.
+route_pair 'cat notes.txt | head -5'
+if [ -z "$ROUTE_TOOLS" ]; then ok; else bad "a reader naming nothing secret still ran: $ROUTE_TOOLS"; fi
+route_pair 'cat .e"n"v'
+case " $ROUTE_TOOLS " in *" perl "*) ok ;; *) bad "a reader naming a quoted .env skipped the tokenizer: $ROUTE_TOOLS" ;; esac
+route_pair "printf '%s' $FRESH > /tmp/fixture-probe"
+case " $ROUTE_TOOLS " in *" grep "*) ok ;; *) bad "a write of a secret shape skipped its grep: $ROUTE_TOOLS" ;; esac
+# Sourced by anything but the authority's loader, a stage file still runs, as it did before it held a function.
+printf '{"tool_input":{"command":"op read op://v/i/f"},"session_id":"%s"}' "$SESSION_ID" | bash -c ". \"\$1\"" _ "$COPY/scripts/secret-mask-guard.sh" >"$OUT" 2>"$ERR"
+assert_exit "a mask guard sourced by another script still blocks a raw op read" 2 $?
 
 echo "=== Prompt-paste surface ==="
 

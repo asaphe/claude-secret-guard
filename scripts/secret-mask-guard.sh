@@ -4,7 +4,7 @@
 # First, and in ASCII: an option or locale inherited from the environment changes how every line below runs - see README § Inherited options and locales.
 set +o keyword +o noclobber
 [ "${LC_ALL:-}" = C ] || unset SG_ASCII_TRAIL; _sg_mb=$'\xe2\x80\x94'; [ ${#_sg_mb} -eq 1 ] || { printf -v _sg_mb '\\x%x' {128..255}; printf -v _sg_mb '%b' "$_sg_mb"; [ ${#_sg_mb} -eq 128 ]; } || { _sg_mb=$'\xe4\x5c'; [ ${#_sg_mb} -ne 1 ] || SG_ASCII_TRAIL=1; LC_ALL=C; export LC_ALL SG_ASCII_TRAIL; }
-
+sg_secret_mask_guard_1() {  # Functions, so the authority loads this file in its own process and no forked stage opens a script - see README § Process launches per call.
 # Pre-parsed by bash-secret-authority.sh, which validated the payload with this stage's own messages — see README § Process launches per call.
 if [ -n "${SGA_PREPARSED:-}" ]; then
   INPUT=$SGA_INPUT; CMD=$SGA_CMD
@@ -28,7 +28,7 @@ fi
 
 SGA_DIR=${BASH_SOURCE[0]%/*}; [ "$SGA_DIR" != "${BASH_SOURCE[0]}" ] || SGA_DIR=.
 # shellcheck source-path=SCRIPTDIR
-source "$SGA_DIR/strip-cmd.sh"
+{ [ "${BASH_SOURCE[0]}" != "$0" ] && [[ ${SGA_HAVE-} == *" strip-cmd.sh "* ]]; } || source "$SGA_DIR/strip-cmd.sh"
 
 # Matched on normalized text: a continuation, an escape or a quote inside the phrase changes the bytes without changing what the shell runs.
 SCAN=$(normalize_cmd "$CMD")
@@ -71,6 +71,10 @@ if [ -n "$SG_OP_OPEN" ]; then
     exit 2
   fi
 fi
+}
+# Run, or sourced by anything but the authority's loader, the stage runs one function level down, so an inherited FUNCNEST gets that level back.
+if [ -z "${SGA_LOADING:-}" ] || [ "${BASH_SOURCE[0]}" = "$0" ]; then case ${FUNCNEST:-} in '' | 0 | *[!0-9]*) ;; *) FUNCNEST=$((10#$FUNCNEST + 1)) ;; esac; sg_secret_mask_guard_1 ${1+"$@"}; fi
+sg_secret_mask_guard_2() {  # Two functions, so a bash that cannot parse the rest still runs the op read check above first, as it did before it was split.
 # A block of its own: bash 3.2 in posix mode cannot parse the `< <(…)` below, and the op read check above has always run before that error.
 if [ -n "$SG_OP_OPEN" ]; then
   # --- the other 1Password subcommands that print a value ---
@@ -318,7 +322,8 @@ SG_INV='(^|[[:space:];&|(])([^[:space:];&|()]*/)?((ba|z|k|da)?sh|source)[[:space
 case $CMD in
   *$'\n'*)
     # shellcheck disable=SC2031  # tr, not ${CMD//$'\n'/;} (~50 s on bash 3.2 for 500 lines); C by export, as lastpipe would restore LC_ALL=C on tr here
-    SG_GATE=$(export LC_ALL=C; printf '%s' "$CMD" | tr '\n' ';') ;;
+    if [ -n "${SGA_PREPARSED:-}" ] && [ "${BASH_VERSINFO[0]}" -ge 5 ] && [ "${#CMD}" -le 8192 ] && [[ $CMD != *[![:ascii:]]* ]] && type -P tr >/dev/null; then SG_GATE=${CMD//$'\n'/;}  # linear over ASCII on bash 5; tr on PATH, since without it this was empty
+    else SG_GATE=$(export LC_ALL=C; printf '%s' "$CMD" | tr '\n' ';'); fi ;;
   *) SG_GATE=$CMD ;;
 esac
 # The invoked script, then what that script sources: deeper needs a case where a sourced file's own sourced file carries the fetch, and each level costs a scan of every candidate.
@@ -370,3 +375,7 @@ if [ "$SG_DEPTH" -lt 2 ] && [[ $SG_GATE =~ $SG_INV ]]; then
 fi
 
 exit 0
+}
+if [ -z "${SGA_LOADING:-}" ] || [ "${BASH_SOURCE[0]}" = "$0" ]; then sg_secret_mask_guard_2 ${1+"$@"}; fi
+# Defined last, so the authority's loader finds the stage only when the whole file parsed.
+sg_secret_mask_guard() { sg_secret_mask_guard_1 ${1+"$@"}; sg_secret_mask_guard_2 ${1+"$@"}; }

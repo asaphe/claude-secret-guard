@@ -12,9 +12,27 @@ normalize_cmd() {
   case ${LC_ALL:-${LC_CTYPE:-${LANG:-C}}} in C | POSIX | *[Uu][Tt][Ff]-8* | *[Uu][Tt][Ff]8*) ;; *) _sg_ext="" ;; esac
   if [ -n "$_sg_ext" ] && _nc=$(printf '%s' "$1" | perl -0777 -pe 's/\\\n//g' 2>/dev/null && printf x); then _nc=${_nc%x}; else _nc=${1//\\$'\n'/}; fi
   # The $ goes with the quote: $'read' and $"read" are quoting forms whose argv is the bare word.
-  _nc=$(printf '%s' "$_nc" | sed -E 's/\$?"([^"[:space:]]*)"/\1/g; s/\$?'"'"'([^'"'"'[:space:]]*)'"'"'/\1/g' 2>/dev/null) || { printf '%s' "$1"; return 0; }
+  if [ -n "${SGA_PREPARSED:-}" ] && [ "${#_nc}" -le 2048 ] && [[ $_nc != *[![:ascii:]]* ]] && type -P sed >/dev/null && sg_unquote _nc "$_nc"; then _nc=${_nc%"${_nc##*[!$'\n']}"}  # same bytes as the sed over ASCII; a missing sed still returns the text as given
+  else _nc=$(printf '%s' "$_nc" | sed -E 's/\$?"([^"[:space:]]*)"/\1/g; s/\$?'"'"'([^'"'"'[:space:]]*)'"'"'/\1/g' 2>/dev/null) || { printf '%s' "$1"; return 0; }; fi
   if [ -n "$_sg_ext" ] && [[ $_nc == *\\* ]] && _sg_ext=$(export LC_ALL=C; printf '%s' "$_nc" | tr -d '\134' 2>/dev/null && printf x); then _nc=${_sg_ext%x}; else _nc=${_nc//\\/}; fi
   if [ -n "$_nc" ]; then printf '%s' "$_nc"; else printf '%s' "$1"; fi
+}
+
+# normalize_cmd's sed, by builtin: a match is a quote pair with no quote or whitespace inside and an optional $ before it, so it never spans a line; non-zero past 64 quotes of one kind, where the loop would cost more than the sed.
+sg_unquote() {  # sg_unquote <var> <text>
+  local _uq_q _uq_in=$2 _uq_out _uq_pre _uq_aft _uq_run _uq_n
+  for _uq_q in '"' "'"; do
+    _uq_out=""; _uq_n=0
+    while [[ $_uq_in == *"$_uq_q"* ]]; do
+      _uq_n=$((_uq_n + 1)); [ "$_uq_n" -le 64 ] || return 1
+      _uq_pre=${_uq_in%%"$_uq_q"*}; _uq_aft=${_uq_in#*"$_uq_q"}
+      _uq_run=" "; [[ $_uq_aft != *"$_uq_q"* ]] || _uq_run=${_uq_aft%%"$_uq_q"*}
+      if [[ $_uq_run == *[[:space:]]* ]]; then _uq_out+=$_uq_pre$_uq_q; _uq_in=$_uq_aft
+      else _uq_out+=${_uq_pre%\$}$_uq_run; _uq_in=${_uq_aft#*"$_uq_q"}; fi
+    done
+    _uq_in=$_uq_out$_uq_in
+  done
+  printf -v "$1" '%s' "$_uq_in"
 }
 
 # The x keeps the trailing newlines a command substitution would strip, so a primed result is byte-identical to a fresh one.

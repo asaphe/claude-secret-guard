@@ -555,8 +555,9 @@ The authority and `op-read-guard.sh` run on every Bash call, and every
 process they launch is one more event for anything that audits process
 launches, such as an endpoint security agent. So the hot path launches as few
 processes as it can while producing exactly the output it would otherwise
-produce. A command that names none of the guarded tools or readers costs one
-`jq`, one `sed` and one `grep`.
+produce. A command that names none of the guarded tools, readers or file
+writes costs one `jq`, and a reader that names nothing secret-looking adds a
+`mktemp` and an `rm`.
 
 - **Exec form.** `hooks/hooks.json` sets `args`, so Claude Code spawns each
   script directly instead of through `sh -c`.
@@ -579,12 +580,25 @@ produce. A command that names none of the guarded tools or readers costs one
   including an empty or unparseable one, is piped to each stage as before,
   so each stage refuses or reads it with its own parse and its own message. NUL bytes on stdin are
   dropped, as `$(cat)` drops them.
-- **Stages are sourced.** Each stage runs in a subshell of the authority, a
-  fork rather than a new `bash`, and keeps its own exit, traps and variables.
-  With `BASH_ENV` set, which every new `bash` reads, each stage still runs as
-  its own `bash`, as does a stage file the authority cannot read, and so does
-  every stage under an inherited `FUNCNEST`, since a sourced stage runs one
-  function level deeper. So does every stage when an option that acts on the
+- **Stages are loaded once and run in forks.** Each stage file holds its
+  stage as a function. The authority sources the helpers and the four stage
+  files in its own process, and each stage runs in the command substitution
+  that captures its output, a fork rather than a new `bash`, keeping its own
+  exit, traps and variables. No fork opens a script: on a macOS machine with
+  an endpoint security agent, every process that a forked shell started after
+  opening one of these scripts waited about 250 ms, at least once in each
+  stage that ran a tool, so a call took 0.3 to 1.4 s. A helper the authority
+  could not load is sourced by the stage itself, and a stage file that did not
+  load as a function is sourced in the fork, so either fails exactly as it
+  did. Run directly, or sourced by anything else, a stage file runs its
+  function, and an inherited `FUNCNEST` is first raised by the one level that
+  call adds. The mask guard is two functions, so a bash that cannot parse the
+  second, as bash 3.2 in posix mode cannot parse `< <(…)`, still runs the op
+  read check in the first. With `BASH_ENV` set, which every new `bash` reads,
+  each stage still runs as its own `bash`, as does a stage file the authority
+  cannot read, and so does every stage under an inherited `FUNCNEST`, since a
+  stage run by the authority is a function call deeper. So does every stage
+  when an option that acts on the
   lines that changed differs from a script's default, as `SHELLOPTS=errexit`,
   `POSIXLY_CORRECT` or `BASHOPTS=nocasematch` make it: only the defaults take
   the one-jq route.
@@ -614,6 +628,32 @@ produce. A command that names none of the guarded tools or readers costs one
 - **One grep per boolean.** Several `grep -qE` calls over the same input
   that feed one yes/no answer are merged into one alternation. A line
   matches the merged pattern exactly when it matches one of the parts.
+- **Builtin stand-ins on the one-jq route.** Only there, where the shell
+  options are the defaults, and only over ASCII text, each of these gives the
+  answer of the tool it stands in for:
+  - `normalize_cmd` unwraps quote pairs by parameter expansion instead of
+    `sed`, for up to 2,048 characters and 64 quotes of a kind, past which the
+    loop costs more than the `sed` it saves. A pair never spans a line, so the
+    loop over the whole text is the `sed` over each line. `sed` must still be
+    on `PATH`, since without it the text has always come back as given.
+  - The write guard first matches its `grep` pattern with bash's engine,
+    minus `\b` and with a line start also allowed after a newline. Both only
+    widen the pattern, so a miss is `grep`'s miss too and skips the `grep`,
+    and a match runs the `grep` unchanged. The secret-shape `grep` is gated
+    the same way.
+  - The reader gate is matched by bash's engine instead of `grep`. A newline
+    is whitespace, which the pattern accepts on either side of a reader name,
+    so a match over the whole text is a match on one of its lines.
+  - The reader skips its `perl` tokenizer when no brace in the command can
+    expand (no comma, and no two dots with only punctuation between them) and
+    the command cannot spell a secret stem (`.env`, `.pem`, `.key`, `.p12`,
+    `.pfx`, `.ssh`, `id_` or `kubeconfig`, in either case) with only
+    non-alphanumeric characters between its letters. Every word the reader
+    judges is a piece of the command with only such characters taken out, so
+    such a command has nothing to flag. Its temporary file is created first,
+    so a failure to create one still asks.
+  - On bash 5, the mask guard joins up to 8 KB of lines by parameter
+    expansion instead of `tr`.
 - **Segments are gated too.** The mask guard splits a command into segments,
   and a heredoc gives one segment per line. A `sed` and three `grep`s on every
   line of a 500-line heredoc take about 40 s. That is past the hook timeout,
