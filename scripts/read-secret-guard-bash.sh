@@ -4,7 +4,7 @@
 # First, and in ASCII: an option or locale inherited from the environment changes how every line below runs - see README § Inherited options and locales.
 set +o keyword +o noclobber
 [ "${LC_ALL:-}" = C ] || unset SG_ASCII_TRAIL; _sg_mb=$'\xe2\x80\x94'; [ ${#_sg_mb} -eq 1 ] || { printf -v _sg_mb '\\x%x' {128..255}; printf -v _sg_mb '%b' "$_sg_mb"; [ ${#_sg_mb} -eq 128 ]; } || { _sg_mb=$'\xe4\x5c'; [ ${#_sg_mb} -ne 1 ] || SG_ASCII_TRAIL=1; LC_ALL=C; export LC_ALL SG_ASCII_TRAIL; }
-
+sg_read_secret_guard_bash() {  # One function, so the authority loads this file in its own process and no forked stage opens a script - see README § Process launches per call.
 if [ -n "${SGA_PREPARSED:-}" ]; then
   INPUT=$SGA_INPUT; CMD=$SGA_CMD
 else
@@ -24,7 +24,7 @@ fi
 
 SGA_DIR=${BASH_SOURCE[0]%/*}; [ "$SGA_DIR" != "${BASH_SOURCE[0]}" ] || SGA_DIR=.
 # shellcheck source-path=SCRIPTDIR
-source "$SGA_DIR/strip-cmd.sh"
+{ [ "${BASH_SOURCE[0]}" != "$0" ] && [[ ${SGA_HAVE-} == *" strip-cmd.sh "* ]]; } || source "$SGA_DIR/strip-cmd.sh"
 
 ask() {
   local log session flat
@@ -60,10 +60,10 @@ norm_may_hold "$CMD" "$SG_MAY_READER" || exit 0
 # Normalized like the mask guard's predicates, or a quoted reader name (`"cat" secrets.pem`) splits into its own segment with no trailing space and matches nothing.
 GATE_CMD=$(normalize_cmd "$CMD")
 # A leading slash admits the same reader named by path, and grep carries no recursive-flag condition: -r decides how many files are read, never whether the one named is a key — see README § Why grep is gated unconditionally.
-printf '%s' "$GATE_CMD" | grep -qE "(^|[[:space:]/$SEP])(cat|head|tail|less|more|grep)([[:space:]<$SEP]|\$)" \
-  || exit 0
-
-
+SG_READER_RE="(^|[[:space:]/$SEP])(cat|head|tail|less|more|grep)([[:space:]<$SEP]|\$)"
+# A newline is whitespace on both sides of a reader name, so over ASCII bash's whole-text match is grep's line match; elsewhere grep decides as before.
+if [ -n "${SGA_PREPARSED:-}" ] && ! shopt -q nocasematch && [[ $GATE_CMD != *[![:ascii:]]* ]]; then [[ $GATE_CMD =~ $SG_READER_RE ]] || exit 0
+else printf '%s' "$GATE_CMD" | grep -qE "$SG_READER_RE" || exit 0; fi
 # Input bytes must not impersonate the tokenizer metadata that narrows scanning.
 case "$CMD" in
   *[$'\001\002\003\004\005']*) ask "READ-SECRET GUARD: command contains reserved tokenizer control bytes and cannot be inspected safely." "ask:inspection" ;;
@@ -366,6 +366,15 @@ tokenize() {
 TOKENS_FILE=$(mktemp) || ask "READ-SECRET GUARD: could not create the temporary file this gate tokenizes into, so the arguments of this read were never inspected — confirm before its contents enter context/transcript."
 FLAT_FILE=""
 trap 'rm -f "$TOKENS_FILE" ${FLAT_FILE:+"$FLAT_FILE"}' EXIT
+# A hook the harness kills at its timeout lets the command run unchecked, so a scan that would overrun asks instead.
+SCAN_DEADLINE=20
+# Tests lower it to exercise the overrun path; it can never be raised past the default.
+[[ ${SECRET_GUARD_SCAN_DEADLINE:-} =~ ^[0-9]+$ ]] && [ "$SECRET_GUARD_SCAN_DEADLINE" -lt "$SCAN_DEADLINE" ] && SCAN_DEADLINE=$SECRET_GUARD_SCAN_DEADLINE
+SG_GAP='[^[:alnum:]]*'
+SG_STEM_RE="\\.${SG_GAP}[eE]${SG_GAP}[nN]${SG_GAP}[vV]|\\.${SG_GAP}[pP]${SG_GAP}[eE]${SG_GAP}[mM]|\\.${SG_GAP}[kK]${SG_GAP}[eE]${SG_GAP}[yY]|\\.${SG_GAP}[pP]${SG_GAP}1${SG_GAP}2|\\.${SG_GAP}[pP]${SG_GAP}[fF]${SG_GAP}[xX]|\\.${SG_GAP}[sS]${SG_GAP}[sS]${SG_GAP}[hH]|[iI]${SG_GAP}[dD]${SG_GAP}_|[kK]${SG_GAP}[uU]${SG_GAP}[bB]${SG_GAP}[eE]${SG_GAP}[cC]${SG_GAP}[oO]${SG_GAP}[nN]${SG_GAP}[fF]${SG_GAP}[iI]${SG_GAP}[gG]"
+SG_DOTS_RE='\.[^[:alnum:]]*\.'
+# Every word judged below is the command's own text with only non-alphanumeric characters dropped, so where no brace can expand (no comma, no two dots), ASCII text that cannot spell a stem that way has none to flag - see README § Process launches per call.
+if [ -n "${SGA_PREPARSED:-}" ] && [ "$SECONDS" -lt "$SCAN_DEADLINE" ] && [[ $CMD != *[![:ascii:]]* ]] && { [[ $CMD != *'{'* ]] || [[ $CMD != *,* && ! $CMD =~ $SG_DOTS_RE ]]; } && ! [[ $CMD =~ $SG_STEM_RE ]]; then exit 0; fi
 tokenize "$CMD" >"$TOKENS_FILE" 2>/dev/null
 # A missing perl empties this, which would make every read silent — fall back to a bare split so the gate still asks.
 if [ ! -s "$TOKENS_FILE" ]; then
@@ -390,6 +399,7 @@ esac
 # Matched with bash's own regex engine rather than a grep per test: this loop runs before every Bash call, and the forks it used to spend cost more than the scan it performs.
 shopt -s nocasematch
 RE_GLOB='[*?]'
+# A stem or path added below goes into SG_STEM_RE too, or the authority's route clears a read of it before the scan.
 ENV_STEM='\.env'
 KEY_STEM='\.(pem|key|p12|pfx)'
 SSH_STEM='id_'
@@ -430,10 +440,6 @@ PREV3=""
 WHERE="the command"
 LITERAL_ONLY=""
 
-# A hook the harness kills at its timeout lets the command run unchecked, so a scan that would overrun asks instead.
-SCAN_DEADLINE=20
-# Tests lower it to exercise the overrun path; it can never be raised past the default.
-[[ ${SECRET_GUARD_SCAN_DEADLINE:-} =~ ^[0-9]+$ ]] && [ "$SECRET_GUARD_SCAN_DEADLINE" -lt "$SCAN_DEADLINE" ] && SCAN_DEADLINE=$SECRET_GUARD_SCAN_DEADLINE
 # Expansion is bounded per command, not per word, or many small brace words add up to the same overrun.
 BRACE_BUDGET=512
 # ASCII A through z, the order bash walks a letter range in, punctuation between the cases included.
@@ -575,3 +581,6 @@ done <"$TOKENS_FILE" 4<"${FLAT_FILE:-/dev/null}"
 [ -n "$SCAN_EOF" ] || ask "READ-SECRET GUARD: this command stopped the inspection partway, so its arguments were not all checked — confirm before any secret file it reads enters context/transcript." "ask:aborted"
 
 exit 0
+}
+# Run, or sourced by anything but the authority's loader, the stage runs one function level down, so an inherited FUNCNEST gets that level back.
+if [ -z "${SGA_LOADING:-}" ] || [ "${BASH_SOURCE[0]}" = "$0" ]; then case ${FUNCNEST:-} in '' | 0 | *[!0-9]*) ;; *) FUNCNEST=$((10#$FUNCNEST + 1)) ;; esac; sg_read_secret_guard_bash ${1+"$@"}; fi
