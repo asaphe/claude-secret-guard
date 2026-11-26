@@ -12,15 +12,16 @@ WORK=$(mktemp -d) || exit 1
 trap 'rm -rf "$WORK"' EXIT
 export HOOK_DIAG_ASK_LOG="$WORK/asks.log"
 
-decide() {  # decide <command-text> -> ASK | SILENT
-  local out
-  out=$(printf '%s' "$(jq -nc --arg c "$1" '{tool_input:{command:$c}}')" | bash "$GUARD" 2>/dev/null)
+decide() {  # decide <command-text> -> ASK | SILENT, or DIVERGED when the authority's route decides otherwise
+  local json out route plain on_route
+  json=$(jq -nc --arg c "$1" '{tool_input:{command:$c}}')
+  out=$(printf '%s' "$json" | bash "$GUARD" 2>/dev/null)
+  # The parse the authority hands over arms the builtin stand-ins and the stem prefilter, so every case here also runs that way.
+  route=$(SGA_PREPARSED=1 SGA_INPUT=$json SGA_CMD=$(printf '%s' "$1") bash "$GUARD" </dev/null 2>/dev/null)
   # A here-string, not a pipe: under pipefail, grep -q exiting early on a large output fails the pipeline.
-  if grep -q '"permissionDecision":[[:space:]]*"ask"' <<<"$out"; then
-    printf 'ASK'
-  else
-    printf 'SILENT'
-  fi
+  if grep -q '"permissionDecision":[[:space:]]*"ask"' <<<"$out"; then plain=ASK; else plain=SILENT; fi
+  if grep -q '"permissionDecision":[[:space:]]*"ask"' <<<"$route"; then on_route=ASK; else on_route=SILENT; fi
+  if [ "$plain" = "$on_route" ]; then printf '%s' "$plain"; else printf 'DIVERGED (%s, %s on the route)' "$plain" "$on_route"; fi
 }
 
 run() {

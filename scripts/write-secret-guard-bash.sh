@@ -47,9 +47,9 @@ W_REDIR='[0-9&]?>>?[[:space:]]*([^&>[:space:]]|&[[:space:]]*[^0-9>&[:space:]-])'
 # Zero only when grep -E <ere> matches no line of <text>: on the authority's route, over ASCII, the ERE without \b and with a line start allowed after any newline only widens - see README § Process launches per call.
 sg_grep_misses() {  # sg_grep_misses <text> <ere>
   [ -n "${SGA_PREPARSED:-}" ] && ! shopt -q nocasematch && [[ $1 != *[![:ascii:]]* ]] || return 1
-  local _gm_re=${2//'[^'/}
-  # An anchor this cannot widen, or a \\b it would split, leaves the answer to grep.
-  [[ $_gm_re != *'$'* && ${_gm_re//'(^|'/} != *'^'* && $2 != *'\\b'* ]] || return 1
+  local _gm_re=${2//'[^'/} _gm_esc=${2//\\\\/}
+  # An anchor this cannot widen, a \\b it would split, or an escape bash's engine reads unlike grep (\s, \w, \<, a back-reference) leaves the answer to grep.
+  [[ $_gm_re != *'$'* && ${_gm_re//'(^|'/} != *'^'* && $2 != *'\\b'* && ${_gm_esc//'\b'/} != *\\[[:alnum:]\<\>\`\']* ]] || return 1
   _gm_re=${2//\\b/}
   _gm_re=${_gm_re//'(^|'/"(^|"$'\n'"|"}
   [[ $1 =~ $_gm_re ]]
@@ -73,5 +73,7 @@ fi
 
 exit 0
 }
-# Run, or sourced by anything but the authority's loader, the stage runs one function level down, so an inherited FUNCNEST gets that level back.
-if [ -z "${SGA_LOADING:-}" ] || [ "${BASH_SOURCE[0]}" = "$0" ]; then case ${FUNCNEST:-} in '' | 0 | *[!0-9]*) ;; *) FUNCNEST=$((10#$FUNCNEST + 1)) ;; esac; sg_write_secret_guard_bash ${1+"$@"}; fi
+# Run, or sourced by anything but the authority's loader, the stage runs one function level down, so an inherited FUNCNEST, read as bash reads it, gets that level back.
+if [ -z "${SGA_LOADING:-}" ] || [ "${BASH_SOURCE[0]}" = "$0" ]; then _sg_n=${FUNCNEST:-}; _sg_n=${_sg_n#"${_sg_n%%[![:space:]]*}"}; _sg_n=${_sg_n%"${_sg_n##*[![:blank:]]}"}; _sg_n=${_sg_n#+}; case $_sg_n in '' | *[!0-9]* | ???????????????????*) ;; *) [ $((10#$_sg_n)) -eq 0 ] || FUNCNEST=$((10#$_sg_n + 1)) ;; esac; sg_write_secret_guard_bash ${1+"$@"}; fi
+# Reached only when a shell error or FUNCNEST aborted the stage partway, since every path through it exits; before it was a function, such an abort skipped one command, not the rest.
+if [ -z "${SGA_LOADING:-}" ] || [ "${BASH_SOURCE[0]}" = "$0" ]; then echo "WRITE-SECRET GUARD: this check stopped partway, so it could not confirm this command is free of secret-shaped literals. Blocking." >&2; exit 2; fi

@@ -227,5 +227,7 @@ fi
 [ -n "$HOOK_EVENT" ] || record
 exit 0
 }
-# Run, or sourced by anything but the authority's loader, the stage runs one function level down, so an inherited FUNCNEST gets that level back.
-if [ -z "${SGA_LOADING:-}" ] || [ "${BASH_SOURCE[0]}" = "$0" ]; then case ${FUNCNEST:-} in '' | 0 | *[!0-9]*) ;; *) FUNCNEST=$((10#$FUNCNEST + 1)) ;; esac; sg_op_read_guard ${1+"$@"}; fi
+# Run, or sourced by anything but the authority's loader, the stage runs one function level down, so an inherited FUNCNEST, read as bash reads it, gets that level back.
+if [ -z "${SGA_LOADING:-}" ] || [ "${BASH_SOURCE[0]}" = "$0" ]; then _sg_n=${FUNCNEST:-}; _sg_n=${_sg_n#"${_sg_n%%[![:space:]]*}"}; _sg_n=${_sg_n%"${_sg_n##*[![:blank:]]}"}; _sg_n=${_sg_n#+}; case $_sg_n in '' | *[!0-9]* | ???????????????????*) ;; *) [ $((10#$_sg_n)) -eq 0 ] || FUNCNEST=$((10#$_sg_n + 1)) ;; esac; sg_op_read_guard ${1+"$@"}; fi
+# Reached only when a shell error or FUNCNEST aborted the stage partway, since every path through it exits; before it was a function, such an abort skipped one command, not the rest.
+if [ -z "${SGA_LOADING:-}" ] || [ "${BASH_SOURCE[0]}" = "$0" ]; then echo "OP-READ GUARD: this check stopped partway, so it could not confirm this command is safe. ${CONSEQUENCE:-Blocking: the guard cannot confirm this command is safe.}" >&2; exit 2; fi

@@ -81,6 +81,15 @@ words with it, and falls back to a bare split when `perl` cannot run, so the
 gate still asks rather than going silent. Blocking every call instead would
 make an absent interpreter a hard outage.
 
+**A stage that bash aborts partway refuses.** An expansion error, or a
+function call past an inherited `FUNCNEST`, ends the command bash is running.
+A stage runs as one function, so that command is the whole stage, which then
+exits 1, and Claude Code runs a command whose hook exits 1. No stage exits 1
+on purpose, so when a stage the authority ran as a function ends with 1, the
+authority blocks, or asks for the reader. A stage file run as its own `bash`
+ends with a line that only an aborted stage reaches, and that line blocks or
+asks the same way.
+
 **Nothing in a command is masked as data.** A heredoc body, a commit message
 or a PR body that names a guarded command is held to that command's rule,
 because whether the shell runs the text is not decided by where it sits. A
@@ -592,7 +601,8 @@ writes costs one `jq`, and a reader that names nothing secret-looking adds a
   load as a function is sourced in the fork, so either fails exactly as it
   did. Run directly, or sourced by anything else, a stage file runs its
   function, and an inherited `FUNCNEST` is first raised by the one level that
-  call adds. The mask guard is two functions, so a bash that cannot parse the
+  call adds, read as bash reads it: blanks and a `+` around the number are
+  dropped, and `0` or `00` stays no limit. The mask guard is two functions, so a bash that cannot parse the
   second, as bash 3.2 in posix mode cannot parse `< <(…)`, still runs the op
   read check in the first. With `BASH_ENV` set, which every new `bash` reads,
   each stage still runs as its own `bash`, as does a stage file the authority
@@ -640,10 +650,13 @@ writes costs one `jq`, and a reader that names nothing secret-looking adds a
     minus `\b` and with a line start also allowed after a newline. Both only
     widen the pattern, so a miss is `grep`'s miss too and skips the `grep`,
     and a match runs the `grep` unchanged. The secret-shape `grep` is gated
-    the same way.
+    the same way. A pattern holding an escape that bash's engine reads unlike
+    `grep` (`\s`, `\w`, `\<`, a back-reference) is left to `grep`.
   - The reader gate is matched by bash's engine instead of `grep`. A newline
     is whitespace, which the pattern accepts on either side of a reader name,
-    so a match over the whole text is a match on one of its lines.
+    so a match over the whole text is a match on one of its lines. Here and in
+    the stem check below, only a clean miss clears: a pattern bash cannot
+    compile leaves the command to the full check.
   - The reader skips its `perl` tokenizer when no brace in the command can
     expand (no comma, and no two dots with only punctuation between them) and
     the command cannot spell a secret stem (`.env`, `.pem`, `.key`, `.p12`,

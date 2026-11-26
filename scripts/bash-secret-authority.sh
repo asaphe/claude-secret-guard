@@ -37,13 +37,17 @@ if [ -z "${BASH_ENV:-}" ] && [ -z "${FUNCNEST:-}" ] && sg_parse_payload 2>/dev/n
     elif [ -f "$HOOKS_DIR/$1" ] && [ -r "$HOOKS_DIR/$1" ]; then ( SECONDS=0; . "$HOOKS_DIR/$1" )
     else printf '%s' "$SGA_INPUT" | bash "$HOOKS_DIR/$1"; fi
   }
+  # No stage exits 1, so a stage run as a function that ends with 1 was aborted partway by bash, which the caller would read as an allow.
+  sg_aborted() { [ "$1" -eq 1 ] && declare -F "$2" >/dev/null; }
 else
   # Any payload the one-jq parse does not take is piped to each stage exactly as before, so each refuses or reads it with its own parse.
   sg_stage() { printf '%s' "$SGA_INPUT" | bash "$HOOKS_DIR/$1"; }
+  sg_aborted() { false; }
 fi
 
 BLOCK_OUT=$(sg_stage secret-mask-guard.sh)
 BLOCK_CODE=$?
+sg_aborted "$BLOCK_CODE" sg_secret_mask_guard && { BLOCK_CODE=2; BLOCK_OUT="SECRET-MASK GUARD: this check stopped partway, so it could not confirm this command is safe. Blocking."; }
 if [ "$BLOCK_CODE" -ne 0 ]; then
   [ -n "$BLOCK_OUT" ] && printf '%s\n' "$BLOCK_OUT" >&2
   exit "$BLOCK_CODE"
@@ -51,6 +55,7 @@ fi
 
 WRITE_BLOCK_OUT=$(sg_stage write-secret-guard-bash.sh)
 WRITE_BLOCK_CODE=$?
+sg_aborted "$WRITE_BLOCK_CODE" sg_write_secret_guard_bash && { WRITE_BLOCK_CODE=2; WRITE_BLOCK_OUT="WRITE-SECRET GUARD: this check stopped partway, so it could not confirm this command is free of secret-shaped literals. Blocking."; }
 if [ "$WRITE_BLOCK_CODE" -ne 0 ]; then
   [ -n "$WRITE_BLOCK_OUT" ] && printf '%s\n' "$WRITE_BLOCK_OUT" >&2
   exit "$WRITE_BLOCK_CODE"
@@ -58,6 +63,7 @@ fi
 
 DUP_OUT=$(sg_stage op-read-guard.sh)
 DUP_CODE=$?
+sg_aborted "$DUP_CODE" sg_op_read_guard && { DUP_CODE=2; DUP_OUT="OP-READ GUARD: this check stopped partway, so it could not confirm this command is safe. Blocking: the guard cannot confirm this command is safe."; }
 if [ "$DUP_CODE" -ne 0 ]; then
   [ -n "$DUP_OUT" ] && printf '%s\n' "$DUP_OUT" >&2
   exit "$DUP_CODE"
@@ -65,6 +71,7 @@ fi
 
 ASK_OUT=$(sg_stage read-secret-guard-bash.sh)
 ASK_CODE=$?
+sg_aborted "$ASK_CODE" sg_read_secret_guard_bash && { ASK_CODE=0; ASK_OUT='{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"ask","permissionDecisionReason":"READ-SECRET GUARD: this command stopped the inspection partway, so its arguments were not all checked \u2014 confirm before any secret file it reads enters context/transcript."}}'; }
 # Without this the reader's own fail-closed branch is inert on the wired path: only its stdout was read, so a non-zero exit reached the caller as a plain allow.
 if [ "$ASK_CODE" -ne 0 ]; then
   [ -n "$ASK_OUT" ] && printf '%s\n' "$ASK_OUT" >&2
