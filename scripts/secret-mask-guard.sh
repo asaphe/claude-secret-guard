@@ -72,8 +72,8 @@ if [ -n "$SG_OP_OPEN" ]; then
   fi
 fi
 }
-# Run, or sourced by anything but the authority's loader, the stage runs one function level down, so an inherited FUNCNEST gets that level back.
-if [ -z "${SGA_LOADING:-}" ] || [ "${BASH_SOURCE[0]}" = "$0" ]; then case ${FUNCNEST:-} in '' | 0 | *[!0-9]*) ;; *) FUNCNEST=$((10#$FUNCNEST + 1)) ;; esac; sg_secret_mask_guard_1 ${1+"$@"}; fi
+# Run, or sourced by anything but the authority's loader, the stage runs one function level down, so an inherited FUNCNEST, read as bash reads it, gets that level back.
+if [ -z "${SGA_LOADING:-}" ] || [ "${BASH_SOURCE[0]}" = "$0" ]; then _sg_n=${FUNCNEST:-}; _sg_n=${_sg_n#"${_sg_n%%[![:space:]]*}"}; _sg_n=${_sg_n%"${_sg_n##*[![:blank:]]}"}; _sg_n=${_sg_n#+}; case $_sg_n in '' | *[!0-9]* | ???????????????????*) ;; *) [ $((10#$_sg_n)) -eq 0 ] || FUNCNEST=$((10#$_sg_n + 1)) ;; esac; SG_MASK_1_RAN=""; sg_secret_mask_guard_1 ${1+"$@"}; SG_MASK_1_RAN=1; fi
 sg_secret_mask_guard_2() {  # Two functions, so a bash that cannot parse the rest still runs the op read check above first, as it did before it was split.
 # A block of its own: bash 3.2 in posix mode cannot parse the `< <(…)` below, and the op read check above has always run before that error.
 if [ -n "$SG_OP_OPEN" ]; then
@@ -376,6 +376,8 @@ fi
 
 exit 0
 }
-if [ -z "${SGA_LOADING:-}" ] || [ "${BASH_SOURCE[0]}" = "$0" ]; then sg_secret_mask_guard_2 ${1+"$@"}; fi
+if [ -z "${SGA_LOADING:-}" ] || [ "${BASH_SOURCE[0]}" = "$0" ]; then [ -n "${SG_MASK_1_RAN:-}" ] || { echo "SECRET-MASK GUARD: this check stopped partway, so it could not confirm this command is safe. Blocking." >&2; exit 2; }; sg_secret_mask_guard_2 ${1+"$@"}; fi
+# Reached only when a shell error or FUNCNEST aborted the stage partway, since every path through it exits; before it was a function, such an abort skipped one command, not the rest.
+if [ -z "${SGA_LOADING:-}" ] || [ "${BASH_SOURCE[0]}" = "$0" ]; then echo "SECRET-MASK GUARD: this check stopped partway, so it could not confirm this command is safe. Blocking." >&2; exit 2; fi
 # Defined last, so the authority's loader finds the stage only when the whole file parsed.
 sg_secret_mask_guard() { sg_secret_mask_guard_1 ${1+"$@"}; sg_secret_mask_guard_2 ${1+"$@"}; }

@@ -62,7 +62,7 @@ GATE_CMD=$(normalize_cmd "$CMD")
 # A leading slash admits the same reader named by path, and grep carries no recursive-flag condition: -r decides how many files are read, never whether the one named is a key — see README § Why grep is gated unconditionally.
 SG_READER_RE="(^|[[:space:]/$SEP])(cat|head|tail|less|more|grep)([[:space:]<$SEP]|\$)"
 # A newline is whitespace on both sides of a reader name, so over ASCII bash's whole-text match is grep's line match; elsewhere grep decides as before.
-if [ -n "${SGA_PREPARSED:-}" ] && ! shopt -q nocasematch && [[ $GATE_CMD != *[![:ascii:]]* ]]; then [[ $GATE_CMD =~ $SG_READER_RE ]] || exit 0
+if [ -n "${SGA_PREPARSED:-}" ] && ! shopt -q nocasematch && [[ $GATE_CMD != *[![:ascii:]]* ]]; then [[ $GATE_CMD =~ $SG_READER_RE ]]; [ $? -ne 1 ] || exit 0
 else printf '%s' "$GATE_CMD" | grep -qE "$SG_READER_RE" || exit 0; fi
 # Input bytes must not impersonate the tokenizer metadata that narrows scanning.
 case "$CMD" in
@@ -374,7 +374,7 @@ SG_GAP='[^[:alnum:]]*'
 SG_STEM_RE="\\.${SG_GAP}[eE]${SG_GAP}[nN]${SG_GAP}[vV]|\\.${SG_GAP}[pP]${SG_GAP}[eE]${SG_GAP}[mM]|\\.${SG_GAP}[kK]${SG_GAP}[eE]${SG_GAP}[yY]|\\.${SG_GAP}[pP]${SG_GAP}1${SG_GAP}2|\\.${SG_GAP}[pP]${SG_GAP}[fF]${SG_GAP}[xX]|\\.${SG_GAP}[sS]${SG_GAP}[sS]${SG_GAP}[hH]|[iI]${SG_GAP}[dD]${SG_GAP}_|[kK]${SG_GAP}[uU]${SG_GAP}[bB]${SG_GAP}[eE]${SG_GAP}[cC]${SG_GAP}[oO]${SG_GAP}[nN]${SG_GAP}[fF]${SG_GAP}[iI]${SG_GAP}[gG]"
 SG_DOTS_RE='\.[^[:alnum:]]*\.'
 # Every word judged below is the command's own text with only non-alphanumeric characters dropped, so where no brace can expand (no comma, no two dots), ASCII text that cannot spell a stem that way has none to flag - see README § Process launches per call.
-if [ -n "${SGA_PREPARSED:-}" ] && [ "$SECONDS" -lt "$SCAN_DEADLINE" ] && [[ $CMD != *[![:ascii:]]* ]] && { [[ $CMD != *'{'* ]] || [[ $CMD != *,* && ! $CMD =~ $SG_DOTS_RE ]]; } && ! [[ $CMD =~ $SG_STEM_RE ]]; then exit 0; fi
+if [ -n "${SGA_PREPARSED:-}" ] && [ "$SECONDS" -lt "$SCAN_DEADLINE" ] && [[ $CMD != *[![:ascii:]]* ]] && { [[ $CMD != *'{'* ]] || { [[ $CMD != *,* ]] && { [[ $CMD =~ $SG_DOTS_RE ]]; [ $? -eq 1 ]; }; }; }; then [[ $CMD =~ $SG_STEM_RE ]]; [ $? -ne 1 ] || exit 0; fi  # only a clean miss clears: =~ returns 2 on a regex it cannot compile
 tokenize "$CMD" >"$TOKENS_FILE" 2>/dev/null
 # A missing perl empties this, which would make every read silent — fall back to a bare split so the gate still asks.
 if [ ! -s "$TOKENS_FILE" ]; then
@@ -582,5 +582,7 @@ done <"$TOKENS_FILE" 4<"${FLAT_FILE:-/dev/null}"
 
 exit 0
 }
-# Run, or sourced by anything but the authority's loader, the stage runs one function level down, so an inherited FUNCNEST gets that level back.
-if [ -z "${SGA_LOADING:-}" ] || [ "${BASH_SOURCE[0]}" = "$0" ]; then case ${FUNCNEST:-} in '' | 0 | *[!0-9]*) ;; *) FUNCNEST=$((10#$FUNCNEST + 1)) ;; esac; sg_read_secret_guard_bash ${1+"$@"}; fi
+# Run, or sourced by anything but the authority's loader, the stage runs one function level down, so an inherited FUNCNEST, read as bash reads it, gets that level back.
+if [ -z "${SGA_LOADING:-}" ] || [ "${BASH_SOURCE[0]}" = "$0" ]; then _sg_n=${FUNCNEST:-}; _sg_n=${_sg_n#"${_sg_n%%[![:space:]]*}"}; _sg_n=${_sg_n%"${_sg_n##*[![:blank:]]}"}; _sg_n=${_sg_n#+}; case $_sg_n in '' | *[!0-9]* | ???????????????????*) ;; *) [ $((10#$_sg_n)) -eq 0 ] || FUNCNEST=$((10#$_sg_n + 1)) ;; esac; sg_read_secret_guard_bash ${1+"$@"}; fi
+# Reached only when a shell error or FUNCNEST aborted the stage partway, since every path through it exits; before it was a function, such an abort skipped one command, not the rest.
+if [ -z "${SGA_LOADING:-}" ] || [ "${BASH_SOURCE[0]}" = "$0" ]; then declare -F ask >/dev/null && ask "READ-SECRET GUARD: this command stopped the inspection partway, so its arguments were not all checked — confirm before any secret file it reads enters context/transcript." "ask:aborted"; printf '%s\n' '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"ask","permissionDecisionReason":"READ-SECRET GUARD: this command stopped the inspection partway, so its arguments were not all checked \u2014 confirm before any secret file it reads enters context/transcript."}}'; exit 0; fi

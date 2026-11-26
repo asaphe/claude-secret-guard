@@ -472,6 +472,42 @@ assert_exit "under FUNCNEST=1 a raw op read still blocks" 2 $?
 printf '{"tool_input":{"command":"cat /a/.env"},"session_id":"%s"}' "$SESSION_ID" | FUNCNEST=2 "$COPY/scripts/bash-secret-authority.sh" >"$OUT" 2>"$ERR"
 assert_exit "under FUNCNEST=2 a reader still exits 0" 0 $?
 if grep -qF '"ask"' "$OUT"; then ok; else bad "under FUNCNEST=2 a reader no longer asks"; fi
+# Under FUNCNEST=1 the reader's own nesting stops its scan partway, which must ask, as its check for a stopped inspection always did.
+printf '{"tool_input":{"command":"cat /a/.env"},"session_id":"%s"}' "$SESSION_ID" | FUNCNEST=1 "$COPY/scripts/bash-secret-authority.sh" >"$OUT" 2>"$ERR"
+assert_exit "under FUNCNEST=1 a reader still exits 0" 0 $?
+if grep -qF '"ask"' "$OUT"; then ok; else bad "under FUNCNEST=1 a reader no longer asks"; fi
+# Bash reads a FUNCNEST with blanks or a plus sign as the number, so the level a stage adds is given back for those too.
+for fn in ' 1' '1 ' '+1'; do
+  printf '{"tool_input":{"command":"op read op://v/i/f"},"session_id":"%s"}' "$SESSION_ID" | FUNCNEST=$fn "$COPY/scripts/bash-secret-authority.sh" >"$OUT" 2>"$ERR"
+  assert_exit "under FUNCNEST='$fn' a raw op read still blocks" 2 $?
+  assert_err_has "under FUNCNEST='$fn' the block is the op read check's own" "raw 'op read'"
+done
+printf '{"tool_input":{"command":"cat /a/.env"},"session_id":"%s"}' "$SESSION_ID" | FUNCNEST=00 "$COPY/scripts/bash-secret-authority.sh" >"$OUT" 2>"$ERR"
+if grep -qF '"ask"' "$OUT"; then ok; else bad "under FUNCNEST=00 a reader no longer asks"; fi
+assert_err_lacks "FUNCNEST=00 stays no limit, as bash reads it" "nesting level"
+# A shell error partway through a stage ends it, and every route must then refuse: an exit 1 reaches Claude Code as an allow.
+for stage in secret-mask-guard_1 secret-mask-guard_2 write-secret-guard-bash op-read-guard read-secret-guard-bash; do
+  BROKEN=$(plugin_copy "abort-$stage")
+  fn=sg_${stage//-/_}; file=${stage%_[12]}.sh
+  perl -0pi -e "s/^(${fn}\\(\\) \\{[^\\n]*\\n)/\$1: \\\$((1\\/0))\\n/m" "$BROKEN/scripts/$file"
+  # shellcheck disable=SC2016  # the injected line, matched as text
+  if grep -q '^: \$((1/0))$' "$BROKEN/scripts/$file"; then ok; else bad "the abort was not injected into $stage"; fi
+  for route in one-jq own-bash direct; do
+    payload=$(jq -nc --arg s "$SESSION_ID" '{session_id:$s, hook_event_name:"PreToolUse", tool_name:"Bash", tool_input:{command:"cat notes.txt"}}')
+    case $route in
+      one-jq) printf '%s' "$payload" | "$BROKEN/scripts/bash-secret-authority.sh" >"$OUT" 2>"$ERR" ;;
+      own-bash) printf '%s' "$payload" | BASH_ENV=/dev/null "$BROKEN/scripts/bash-secret-authority.sh" >"$OUT" 2>"$ERR" ;;
+      direct) printf '%s' "$payload" | bash "$BROKEN/scripts/$file" >"$OUT" 2>"$ERR" ;;
+    esac
+    rc=$?
+    if [ "$stage" = read-secret-guard-bash ]; then
+      if [ "$rc" -eq 0 ] && grep -qF '"ask"' "$OUT"; then ok; else bad "an aborted reader did not ask on the $route route (exit $rc)"; fi
+    else
+      assert_exit "an aborted $stage blocks on the $route route" 2 "$rc"
+      assert_err_has "an aborted $stage says it stopped partway on the $route route" "stopped partway"
+    fi
+  done
+done
 # The read builtin honors an inherited TMOUT, which $(cat) never did.
 { printf '{"tool_input":{"command":'; sleep 2; printf '"ls"},"session_id":"%s"}' "$SESSION_ID"; } | TMOUT=1 "$COPY/scripts/bash-secret-authority.sh" >"$OUT" 2>"$ERR"
 assert_exit "a payload paused longer than an inherited TMOUT is still read whole" 0 $?
